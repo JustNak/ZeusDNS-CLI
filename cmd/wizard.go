@@ -4,7 +4,6 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 
@@ -17,6 +16,10 @@ import (
 // Wizard runs the first-run setup: a huh form that collects and live-validates
 // the primary (and optional fallback) resolver, then writes the config,
 // installs and starts the service.
+//
+// A non-admin user can still collect and save a config (resolver validation
+// needs no admin); the install step is skipped with a clear message so the
+// user can re-run `zeusdns` elevated to finish setup via the resume path.
 func Wizard(configPath string, verbose bool) int {
 	res, err := tui.RunWizard()
 	if err != nil {
@@ -37,22 +40,31 @@ func Wizard(configPath string, verbose bool) int {
 	fmt.Println("\nConfiguring...")
 	step("writing config", func() error { return cfg.Save(configPath) })
 
+	// Installing/starting the service needs admin. If we're not elevated,
+	// stop here with a clear message — the config is saved, so re-running
+	// `zeusdns` as admin will resume setup and install the service.
+	if !requireAdmin("install the ZeusDNS service") {
+		fmt.Println("\n" + tui.OKStyle.Render("Config saved."))
+		fmt.Println("To install the service, re-open this terminal as administrator and run `zeusdns`.")
+		Pause()
+		return internal.ExitSuccess
+	}
+
 	step("installing service", func() error {
 		if err := Preflight(cfg.Addr()); err != nil {
 			return err
 		}
-		binPath, err := serviceBinPath(configPath)
+		exe, args, err := serviceBinPath(configPath)
 		if err != nil {
 			return err
 		}
 		_ = service.Uninstall() // idempotent reinstall
-		return service.Install(binPath)
+		return service.Install(exe, args...)
 	})
 	step("starting service", func() error { return service.Start() })
 
 	fmt.Println("\n" + tui.OKStyle.Render("Done!!!"))
-	fmt.Print("Enter To Exit: ")
-	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	Pause()
 	return internal.ExitSuccess
 }
 

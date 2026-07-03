@@ -76,8 +76,16 @@ func run() int {
 			return cmd.Wizard(configPath, verbose)
 		}
 		// Config exists. If the service isn't installed (e.g. a previous run
-		// wrote config but failed to install without admin), resume setup.
+		// wrote config but failed to install without admin), resume setup —
+		// but only if we're elevated; otherwise a bare `zeusdns` would throw a
+		// raw "Access is denied" from the SCM. Non-admin gets a clear hint.
 		if _, err := service.Status(); err != nil {
+			if !cmd.IsElevated() {
+				fmt.Println("Config found but the service isn't installed.")
+				fmt.Println("To finish setup, re-open this terminal as administrator and run `zeusdns`.")
+				cmd.Pause()
+				return internal.ExitMisconfig
+			}
 			fmt.Println("Config found but service isn't installed — resuming setup...")
 			code := cmd.Install(configPath, verbose)
 			cmd.Pause()

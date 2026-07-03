@@ -55,6 +55,9 @@ func Status(configPath string, verbose bool) int {
 
 // Install (re)installs and starts the service using the existing config.
 func Install(configPath string, verbose bool) int {
+	if !requireAdmin("install the ZeusDNS service") {
+		return internal.ExitMisconfig
+	}
 	if !config.Exists(configPath) {
 		fmt.Fprintln(os.Stderr, "no config found. run `zeusdns` first to set up.")
 		return internal.ExitMisconfig
@@ -78,12 +81,12 @@ func Install(configPath string, verbose bool) int {
 		return internal.ExitMisconfig
 	}
 
-	binPath, err := serviceBinPath(configPath)
+	exe, args, err := serviceBinPath(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "resolve bin path:", err)
 		return internal.ExitMisconfig
 	}
-	if err := service.Install(binPath); err != nil {
+	if err := service.Install(exe, args...); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
 		return internal.ExitMisconfig
 	}

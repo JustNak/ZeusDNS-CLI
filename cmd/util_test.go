@@ -53,33 +53,30 @@ func TestIsAddrInUseDistinguishesErrno(t *testing.T) {
 }
 
 func TestServiceBinPath(t *testing.T) {
-	// default config -> just the quoted exe, no -c flag
-	bp, err := serviceBinPath(config.DefaultFile)
+	// default config -> just the exe, no -c args
+	exe, args, err := serviceBinPath(config.DefaultFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(bp, `"`) || !strings.HasSuffix(bp, `"`) {
-		t.Errorf("default binPath should be just the quoted exe: %q", bp)
+	if exe == "" {
+		t.Error("exe path should be non-empty")
 	}
-	if strings.Contains(bp, "-c") {
-		t.Errorf("default config must not add -c: %q", bp)
+	if len(args) != 0 {
+		t.Errorf("default config must not add -c args, got: %v", args)
 	}
 
 	// empty configPath -> same as default (no -c)
-	bpEmpty, _ := serviceBinPath("")
-	if strings.Contains(bpEmpty, "-c") {
-		t.Errorf("empty configPath must not add -c: %q", bpEmpty)
+	_, argsEmpty, _ := serviceBinPath("")
+	if len(argsEmpty) != 0 {
+		t.Errorf("empty configPath must not add -c args, got: %v", argsEmpty)
 	}
 
-	// custom config -> quoted exe + -c "path"
-	bpCustom, err := serviceBinPath(`C:\custom\config.yaml`)
+	// custom config -> exe + ["-c", path]
+	_, argsCustom, err := serviceBinPath(`C:\custom\config.yaml`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(bpCustom, `-c "C:\custom\config.yaml"`) {
-		t.Errorf("custom config should append -c \"path\": %q", bpCustom)
-	}
-	if !strings.HasPrefix(bpCustom, `"`) {
-		t.Errorf("custom binPath exe should be quoted: %q", bpCustom)
+	if len(argsCustom) != 2 || argsCustom[0] != "-c" || argsCustom[1] != `C:\custom\config.yaml` {
+		t.Errorf("custom config should return [-c path], got: %v", argsCustom)
 	}
 }

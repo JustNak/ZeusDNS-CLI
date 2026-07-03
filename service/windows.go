@@ -29,22 +29,24 @@ func IsWindowsService() bool {
 
 func connect() (*mgr.Mgr, error) { return mgr.Connect() }
 
-// Install creates the service pointing at binPath with automatic start.
-func Install(binPath string) error {
+// Install creates the service pointing at exePath with automatic start.
+// Extra args (e.g. "-c", configPath) are appended to the service binPath;
+// CreateService escapes each one correctly. Pass JUST the exe path as
+// exePath, not a pre-quoted command line.
+func Install(exePath string, args ...string) error {
 	m, err := connect()
 	if err != nil {
 		return fmt.Errorf("connect SCM: %w", err)
 	}
 	defer m.Disconnect()
 
-	s, err := m.CreateService(config.ServiceName, binPath, mgr.Config{
-		ServiceType:    windows.SERVICE_WIN32_OWN_PROCESS,
-		StartType:      mgr.StartAutomatic,
-		ErrorControl:   mgr.ErrorNormal,
-		DisplayName:    config.ServiceName,
-		Description:    config.ServiceDesc,
-		BinaryPathName: binPath,
-	})
+	s, err := m.CreateService(config.ServiceName, exePath, mgr.Config{
+		ServiceType:  windows.SERVICE_WIN32_OWN_PROCESS,
+		StartType:    mgr.StartAutomatic,
+		ErrorControl: mgr.ErrorNormal,
+		DisplayName:  config.ServiceName,
+		Description:  config.ServiceDesc,
+	}, args...)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}

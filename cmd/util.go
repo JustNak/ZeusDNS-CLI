@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/JustNak/ZeusDNS-CLI/config"
+	"github.com/JustNak/ZeusDNS-CLI/windows"
 )
 
 // Pause prints "Press Enter to exit: " and blocks for a newline, so a
@@ -38,23 +39,45 @@ func isAddrInUse(err error) bool {
 	return strings.Contains(s, "in use") || strings.Contains(s, "address already in use")
 }
 
-// serviceBinPath builds the SCM service binary path: the absolute executable
-// path wrapped in double quotes (mandatory when it contains spaces, e.g.
-// C:\Program Files\ZeusDNS\zeusdns.exe), followed by `-c <configPath>` when a
-// non-default config file is in use. Without the -c flag, a service installed
-// via `zeusdns install -c custom.yaml` would preflight custom.yaml's port but
-// then run against the default config (port 53) at runtime.
-func serviceBinPath(configPath string) (string, error) {
-	exe, err := os.Executable()
+// IsElevated reports whether the current process is running with admin rights.
+// Exposed so main.go can decide whether to resume-setup without attempting a
+// privileged call that would throw a raw SCM error.
+func IsElevated() bool { return windows.IsElevated() }
+
+// requireAdmin returns true if the current process is elevated. If not, it
+// prints a clear, actionable message naming the action that needs admin and
+// returns false — callers should then return ExitMisconfig without attempting
+// the privileged operation (so the user never sees a raw SCM "Access denied").
+func requireAdmin(action string) bool {
+	if windows.IsElevated() {
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "Administrator rights are required to %s.\n\n", action)
+	fmt.Fprintln(os.Stderr, "Re-open your terminal as administrator, then run `zeusdns` again:")
+	fmt.Fprintln(os.Stderr, "  Right-click Windows Terminal / PowerShell / Command Prompt")
+	fmt.Fprintln(os.Stderr, "  → \"Run as administrator\"")
+	return false
+}
+
+// serviceBinPath returns the absolute executable path and the extra args
+// to pass to CreateService. CreateService builds the registered binPath as
+// EscapeArg(exe) + " " + EscapeArg(arg)... so the exe must be passed
+// separately from flags (passing `"exe" -c "cfg"` as one string gets
+// mangled into a single quoted blob and the SCM can't find the file).
+//
+// A -c flag is appended only when configPath is a non-default file; without
+// it, `zeusdns install -c custom.yaml` would preflight custom's port but the
+// service would run against the default config (port 53).
+func serviceBinPath(configPath string) (exe string, args []string, err error) {
+	exe, err = os.Executable()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	exe, _ = filepath.Abs(exe)
-	bin := "\"" + exe + "\""
 	if configPath != "" && configPath != config.DefaultFile {
-		bin += " -c \"" + configPath + "\""
+		args = []string{"-c", configPath}
 	}
-	return bin, nil
+	return exe, args, nil
 }
 
 // Preflight checks that the local DNS port is free before the service binds it.
