@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -18,13 +19,40 @@ type dohClient struct {
 	client *http.Client
 }
 
-func newDoHClient(u *Upstream) (*dohClient, error) {
+func newDoHClient(u *Upstream, r *net.Resolver) (*dohClient, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// When a bootstrap resolver is set, resolve the upstream hostname through
+	// it instead of the system resolver. Once ZeusDNS sets the system DNS to
+	// 127.0.0.1, the system resolver IS ZeusDNS, so a normal lookup of the
+	// DoH host loops back to us and every query times out.
+	if r != nil {
+		d := &net.Dialer{Timeout: 5 * time.Second}
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return d.DialContext(ctx, network, addr)
+			}
+			if net.ParseIP(host) != nil { // literal IP — dial directly
+				return d.DialContext(ctx, network, addr)
+			}
+			ips, err := r.LookupHost(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("bootstrap resolve %s: %w", host, err)
+			}
+			var lastErr error
+			for _, ip := range ips {
+				c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+				if err == nil {
+					return c, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		}
+	}
 	return &dohClient{
-		url: u.URL,
-		client: &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: http.DefaultTransport.(*http.Transport).Clone(),
-		},
+		url:    u.URL,
+		client: &http.Client{Timeout: 10 * time.Second, Transport: transport},
 	}, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/miekg/dns"
@@ -29,7 +30,9 @@ type Server struct {
 }
 
 // NewServer parses the configured upstreams and prepares the local server.
-func NewServer(cfg *config.Config, log *internal.Logger) (*Server, error) {
+// resolver (if non-nil) is used to resolve upstream hostnames, bypassing the
+// system DNS once ZeusDNS takes it over; pass nil for pre-service test paths.
+func NewServer(cfg *config.Config, log *internal.Logger, resolver *net.Resolver) (*Server, error) {
 	s := &Server{
 		cfg:       cfg,
 		log:       log,
@@ -42,7 +45,7 @@ func NewServer(cfg *config.Config, log *internal.Logger) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: %w", raw, err)
 		}
-		ex, err := u.Exchanger()
+		ex, err := u.Exchanger(resolver)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: %w", raw, err)
 		}

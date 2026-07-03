@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -14,22 +15,42 @@ import (
 // per upstream and reconnects on failure. A per-call deadline bounds the
 // underlying read/write so a dead server cannot pin the goroutine.
 type dotClient struct {
-	server string
-	tls    *tls.Config
-	mu     sync.Mutex
-	conn   *dns.Conn
+	host     string
+	port     string
+	tls      *tls.Config
+	resolver *net.Resolver // bootstrap resolver (nil → system resolver)
+	mu       sync.Mutex
+	conn     *dns.Conn
 }
 
-func newDoTClient(u *Upstream) (*dotClient, error) {
+func newDoTClient(u *Upstream, r *net.Resolver) (*dotClient, error) {
+	host, port, err := net.SplitHostPort(u.Server)
+	if err != nil {
+		return nil, fmt.Errorf("bad DoT server %q: %w", u.Server, err)
+	}
 	return &dotClient{
-		server: u.Server,
-		tls:    &tls.Config{ServerName: u.Host, MinVersion: tls.VersionTLS12},
+		host:     host,
+		port:     port,
+		tls:      &tls.Config{ServerName: u.Host, MinVersion: tls.VersionTLS12},
+		resolver: r,
 	}, nil
 }
 
+// dial connects to the upstream. When a bootstrap resolver is set, the host
+// is resolved through it (not the system DNS, which is 127.0.0.1 = us);
+// otherwise miekg/dns falls back to the system resolver, used by the
+// wizard/configure test path before ZeusDNS takes over the system DNS.
 func (c *dotClient) dial() error {
+	addr := c.host
+	if net.ParseIP(c.host) == nil && c.resolver != nil {
+		ips, err := c.resolver.LookupHost(context.Background(), c.host)
+		if err != nil || len(ips) == 0 {
+			return fmt.Errorf("bootstrap resolve %s: %w", c.host, err)
+		}
+		addr = ips[0]
+	}
 	cl := &dns.Client{Net: "tcp-tls", TLSConfig: c.tls, Timeout: 10 * time.Second}
-	conn, err := cl.Dial(c.server)
+	conn, err := cl.Dial(net.JoinHostPort(addr, c.port))
 	if err != nil {
 		return err
 	}
@@ -106,7 +127,7 @@ func (c *dotClient) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		return nil, ctx.Err()
 	case got := <-ch:
 		if got.err != nil {
-			return nil, fmt.Errorf("DoT %s: %w", c.server, got.err)
+			return nil, fmt.Errorf("DoT %s: %w", net.JoinHostPort(c.host, c.port), got.err)
 		}
 		return got.r, nil
 	}

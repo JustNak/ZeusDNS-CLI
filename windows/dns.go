@@ -8,6 +8,7 @@ package windows
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -34,15 +35,20 @@ func quoteAlias(alias string) string {
 	return "'" + strings.ReplaceAll(alias, "'", "''") + "'"
 }
 
-// SaveSystemDNS records the current IPv4 DNS server addresses per interface
-// to config.PrevDNSFile so they can be restored on stop/uninstall.
-func SaveSystemDNS() error {
+// getSystemDNS reads the current IPv4 DNS server addresses per interface.
+func getSystemDNS() ([]ifaceDNS, error) {
 	script := `Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object InterfaceAlias,ServerAddresses | ConvertTo-Json -Compress -Depth 3`
 	out, err := ps(script)
 	if err != nil {
-		return fmt.Errorf("Get-DnsClientServerAddress: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("Get-DnsClientServerAddress: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	entries, err := normalizePSJSON(out)
+	return normalizePSJSON(out)
+}
+
+// SaveSystemDNS records the current IPv4 DNS server addresses per interface
+// to config.PrevDNSFile so they can be restored on stop/uninstall.
+func SaveSystemDNS() error {
+	entries, err := getSystemDNS()
 	if err != nil {
 		return err
 	}
@@ -55,6 +61,45 @@ func SaveSystemDNS() error {
 	}
 	return os.WriteFile(config.PrevDNSFile, data, 0o644)
 }
+
+// GetBootstrapDNS returns the current system DNS server IPs suitable for use
+// as a bootstrap resolver — the servers ZeusDNS will query directly to
+// resolve DoH/DoT upstream hostnames, bypassing the system resolver (which
+// becomes 127.0.0.1 = ZeusDNS itself after takeover and would loop). Loopback
+// and unspecified addresses are excluded. If none remain usable, well-known
+// public resolvers are returned as a fallback.
+//
+// Must be called BEFORE SetSystemDNS so it captures the real upstream DNS
+// (the router or VPN's DNS), not 127.0.0.1.
+func GetBootstrapDNS() []string {
+	entries, err := getSystemDNS()
+	if err != nil {
+		return publicBootstrap
+	}
+	seen := map[string]bool{}
+	var ips []string
+	for _, e := range entries {
+		for _, s := range e.ServerAddresses {
+			ip := net.ParseIP(s)
+			if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+				continue
+			}
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			ips = append(ips, s)
+		}
+	}
+	if len(ips) == 0 {
+		return publicBootstrap
+	}
+	return ips
+}
+
+// publicBootstrap is the fallback when no usable system DNS is available
+// (e.g. the only server was 127.0.0.1 from another forwarder already running).
+var publicBootstrap = []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}
 
 // normalizePSJSON handles PowerShell's habit of emitting a bare object (not
 // an array) when only one interface is returned.

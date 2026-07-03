@@ -104,15 +104,46 @@ type Exchanger interface {
 	Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error)
 }
 
-// Exchanger returns a client for this upstream's protocol.
-func (u *Upstream) Exchanger() (Exchanger, error) {
+// Exchanger returns a client for this upstream's protocol. The resolver (if
+// non-nil) resolves the upstream hostname, bypassing the system DNS — once
+// ZeusDNS sets the system DNS to 127.0.0.1, resolving the upstream host via
+// the system resolver would loop back to ZeusDNS itself and time out. Pass
+// nil for the wizard/configure test path (system DNS not yet taken over).
+func (u *Upstream) Exchanger(r *net.Resolver) (Exchanger, error) {
 	switch u.Proto {
 	case DoH:
-		return newDoHClient(u)
+		return newDoHClient(u, r)
 	case DoT:
-		return newDoTClient(u)
+		return newDoTClient(u, r)
 	default:
 		return nil, fmt.Errorf("unknown protocol %q", u.Proto)
+	}
+}
+
+// NewBootstrapResolver returns a *net.Resolver that resolves hostnames by
+// sending plain DNS directly to the given bootstrap server IPs (port 53),
+// bypassing the system resolver entirely. This breaks the loop where the
+// system DNS (127.0.0.1 = ZeusDNS) would be asked to resolve the DoH/DoT
+// upstream host. If bootstrap is empty, nil is returned and the caller uses
+// the normal system resolver.
+func NewBootstrapResolver(bootstrap []string) *net.Resolver {
+	if len(bootstrap) == 0 {
+		return nil
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{}
+			var lastErr error
+			for _, ip := range bootstrap {
+				c, err := d.DialContext(ctx, "udp", net.JoinHostPort(ip, "53"))
+				if err == nil {
+					return c, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
 	}
 }
 
@@ -122,7 +153,7 @@ func (u *Upstream) Display() string { return fmt.Sprintf("%s   (%s)", u.Raw, u.P
 // Check sends a test A query for example.com. and returns nil if the upstream
 // answers with NOERROR. Used by the wizard and the `configure` test action.
 func (u *Upstream) Check(ctx context.Context) error {
-	ex, err := u.Exchanger()
+	ex, err := u.Exchanger(nil)
 	if err != nil {
 		return err
 	}

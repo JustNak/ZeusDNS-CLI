@@ -38,7 +38,15 @@ func Run(ctx context.Context, configPath string, verbose bool) error {
 
 	log.Info("zeusdns starting", "version", Version, "addr", cfg.Addr())
 
+	// Capture the system's current DNS servers (router or VPN DNS) BEFORE
+	// setting 127.0.0.1: they become the bootstrap resolver used to resolve
+	// DoH/DoT upstream hostnames directly, bypassing the system resolver
+	// (which is about to point at 127.0.0.1 = ZeusDNS itself and would loop).
+	// See NewBootstrapResolver / GetBootstrapDNS.
+	var bootstrap []string
 	if cfg.Windows.SetSystemDNS {
+		bootstrap = windows.GetBootstrapDNS()
+		log.Info("bootstrap resolver", "servers", bootstrap)
 		if err := windows.SaveSystemDNS(); err != nil {
 			log.Warn("save system dns failed (need admin?)", "err", err)
 		}
@@ -59,7 +67,7 @@ func Run(ctx context.Context, configPath string, verbose bool) error {
 		}
 	}
 
-	srv, err := dns.NewServer(cfg, log)
+	srv, err := dns.NewServer(cfg, log, dns.NewBootstrapResolver(bootstrap))
 	if err != nil {
 		cleanup(log, cfg, wfp)
 		return err
