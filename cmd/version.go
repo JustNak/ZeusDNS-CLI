@@ -1,3 +1,6 @@
+//go:build windows
+// +build windows
+
 // Package cmd implements the user-facing command handlers (wizard, configure,
 // service lifecycle, foreground run, update). main.go dispatches to these.
 package cmd

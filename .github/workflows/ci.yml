@@ -27,15 +27,16 @@ jobs:
             exit 1
           fi
 
-      - name: go vet
+      - name: go vet (windows target)
         env:
+          GOOS: windows
           CGO_ENABLED: 0
         run: go vet ./...
 
-      - name: go test
+      - name: go test (cross-platform packages)
         env:
           CGO_ENABLED: 0
-        run: go test ./...
+        run: go test ./config/... ./dns/... ./tui/...
 
       - name: build windows/amd64
         env:

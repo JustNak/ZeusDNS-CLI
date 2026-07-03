@@ -1,3 +1,6 @@
+//go:build windows
+// +build windows
+
 // Package windows contains Windows-only native helpers: setting/restoring
 // the system DNS servers and the WFP loopback-DNS protection filter.
 package windows

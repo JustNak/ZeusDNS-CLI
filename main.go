@@ -1,3 +1,6 @@
+//go:build windows
+// +build windows
+
 // ZeusDNS-CLI — a stripped-down Windows-only secure DNS forwarder.
 //
 // It runs a local DNS server on 127.0.0.1:53 that forwards to an ordered list

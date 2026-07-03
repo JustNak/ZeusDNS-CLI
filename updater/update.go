@@ -1,3 +1,6 @@
+//go:build windows
+// +build windows
+
 // Package updater implements a minimal GitHub-releases self-update for the
 // zeusdns.exe binary. It downloads the latest windows release zip, swaps the
 // binary using a rename-aside (the running image can be renamed but not

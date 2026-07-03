@@ -1,3 +1,6 @@
+//go:build windows
+// +build windows
+
 // Package service manages the ZeusDNS Windows service lifecycle (install,
 // uninstall, start, stop, restart, status) and provides the in-service
 // execution loop used when the binary is launched by the Service Control
