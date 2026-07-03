@@ -59,8 +59,30 @@ func Install(configPath string, verbose bool) int {
 		fmt.Fprintln(os.Stderr, "no config found. run `zeusdns` first to set up.")
 		return internal.ExitMisconfig
 	}
-	binPath, _ := os.Executable()
-	_ = service.Uninstall()
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "load config:", err)
+		return internal.ExitMisconfig
+	}
+	// If our own service is running, stop it first so it releases port 53.
+	if st, _ := service.Status(); st == "running" || st == "start-pending" {
+		_ = service.Stop()
+	}
+	_ = service.Uninstall() // idempotent: clear any leftover registration
+
+	// Pre-flight: port 53 must be free. If ctrld / AdGuard Home / the Windows
+	// DNS cache still holds it, bail out with a clear message instead of
+	// installing a service that will crash-loop on bind.
+	if err := Preflight(cfg.Addr()); err != nil {
+		fmt.Fprintln(os.Stderr, "pre-flight check failed:", err)
+		return internal.ExitMisconfig
+	}
+
+	binPath, err := serviceBinPath(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "resolve bin path:", err)
+		return internal.ExitMisconfig
+	}
 	if err := service.Install(binPath); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
 		return internal.ExitMisconfig

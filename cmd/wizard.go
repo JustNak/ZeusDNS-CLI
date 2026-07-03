@@ -37,8 +37,14 @@ func Wizard(configPath string, verbose bool) int {
 	fmt.Println("\nConfiguring...")
 	step("writing config", func() error { return cfg.Save(configPath) })
 
-	binPath, _ := os.Executable()
 	step("installing service", func() error {
+		if err := Preflight(cfg.Addr()); err != nil {
+			return err
+		}
+		binPath, err := serviceBinPath(configPath)
+		if err != nil {
+			return err
+		}
 		_ = service.Uninstall() // idempotent reinstall
 		return service.Install(binPath)
 	})

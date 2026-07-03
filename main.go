@@ -41,6 +41,18 @@ func run() int {
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return internal.ExitBadArg
 	}
+	args := fs.Args()
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+		// Allow flags after the subcommand, e.g. `zeusdns install -c path`.
+		// Go's flag package stops at the first non-flag token, so re-parse the tail.
+		if len(args) > 1 {
+			if err := fs.Parse(args[1:]); err != nil {
+				return internal.ExitBadArg
+			}
+		}
+	}
 	if showVersion {
 		fmt.Println("zeusdns", cmd.Version)
 		return internal.ExitSuccess
@@ -58,18 +70,20 @@ func run() int {
 		return internal.ExitSuccess
 	}
 
-	args := fs.Args()
-	name := ""
-	if len(args) > 0 {
-		name = args[0]
-	}
-
 	switch name {
 	case "":
-		if config.Exists(configPath) {
-			return cmd.Status(configPath, verbose)
+		if !config.Exists(configPath) {
+			return cmd.Wizard(configPath, verbose)
 		}
-		return cmd.Wizard(configPath, verbose)
+		// Config exists. If the service isn't installed (e.g. a previous run
+		// wrote config but failed to install without admin), resume setup.
+		if _, err := service.Status(); err != nil {
+			fmt.Println("Config found but service isn't installed — resuming setup...")
+			code := cmd.Install(configPath, verbose)
+			cmd.Pause()
+			return code
+		}
+		return cmd.Status(configPath, verbose)
 	case "wizard", "setup":
 		return cmd.Wizard(configPath, verbose)
 	case "configure":
