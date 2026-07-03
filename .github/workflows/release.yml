@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+
+      - name: Determine version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        env:
+          CGO_ENABLED: 0
+        run: go test ./...
+
+      # Pure-Go project (CGO_ENABLED=0) cross-compiles to Windows from Linux.
+      - name: Build windows/amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags "-X github.com/JustNak/ZeusDNS-CLI/cmd.Version=${{ steps.ver.outputs.version }}" -o zeusdns.exe .
+          zip -j zeusdns_${{ steps.ver.outputs.version }}_windows_amd64.zip zeusdns.exe
+
+      - name: Build windows/arm64
+        env:
+          GOOS: windows
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          rm -f zeusdns.exe
+          go build -trimpath -ldflags "-X github.com/JustNak/ZeusDNS-CLI/cmd.Version=${{ steps.ver.outputs.version }}" -o zeusdns.exe .
+          zip -j zeusdns_${{ steps.ver.outputs.version }}_windows_arm64.zip zeusdns.exe
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            zeusdns_${{ steps.ver.outputs.version }}_windows_amd64.zip \
+            zeusdns_${{ steps.ver.outputs.version }}_windows_arm64.zip \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

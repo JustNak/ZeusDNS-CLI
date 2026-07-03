@@ -1,0 +1,24 @@
+# Built binaries
+/zeusdns.exe
+*.exe
+*.zip
+
+# Test / coverage artifacts
+*.out
+*.test
+coverage.txt
+
+# Local config that should never be committed (lives in %ProgramData% at runtime)
+config.yaml
+prev_dns.json
+
+# Editor / OS clutter
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Go workspace files (we use a single module)
+go.work
+go.work.sum

@@ -1,0 +1,86 @@
+<!doctype html><html><head><meta charset="utf-8"><title>ZeusDNS-CLI TUI preview</title>
+<style>
+  :root{
+    --blue:#00afff;   /* lipgloss 39 - title */
+    --green:#00d700;  /* lipgloss 42 - accent/ok/primary */
+    --red:#ff5f5f;    /* lipgloss 203 - error */
+    --gray:#8a8a8a;   /* lipgloss 245 - dim/label */
+    --amber:#ffaf00;  /* lipgloss 214 - pending */
+    --cyan:#00d7ff;   /* lipgloss 45 - subtitle */
+    --purple:#af87ff; /* lipgloss 141 - cursor */
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#0c0c0c;color:#e6e6e6;font:14px/1.5 "Cascadia Mono","JetBrains Mono",Consolas,monospace;padding:24px}
+  .screen{background:#121212;border:1px solid #2a2a2a;border-radius:8px;padding:20px 24px;max-width:760px;margin:0 0 28px 0;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+  .title{color:var(--blue);font-weight:700;padding:2px 14px;display:inline-block;border:1px solid #1f3b53;border-radius:4px;background:#0a1620}
+  .subtitle{color:var(--cyan);font-weight:700;margin:18px 0 12px}
+  .row{white-space:pre;display:flex;align-items:center;gap:8px;padding:1px 0}
+  .cursor{color:var(--purple);font-weight:700}
+  .nc{color:var(--gray)}
+  .idx{color:var(--gray);width:26px;text-align:right}
+  .res{width:50ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .primary{color:var(--green);font-weight:700}
+  .fallback{color:var(--gray)}
+  .tag{color:var(--gray);width:5ch}
+  .ok{color:var(--green);font-weight:700}
+  .err{color:var(--red);font-weight:700}
+  .footer{color:var(--gray);margin-top:16px;border-top:1px solid #232323;padding-top:12px}
+  .input{border:1px solid #333;border-radius:4px;padding:6px 10px;color:#e6e6e6;background:#0a0a0a;margin:6px 0;width:60ch}
+  .caret{color:var(--green)}
+  .hint{color:var(--gray);margin-top:14px}
+  .pending{color:var(--amber);margin:14px 0}
+  .badge{font-size:11px;letter-spacing:.5px}
+  .h{color:var(--gray);margin:0 0 10px;font-size:12px;letter-spacing:1px;text-transform:uppercase}
+</style></head>
+<body>
+
+<div class="screen">
+  <div class="h">zeusdns configure — list mode</div>
+  <span class="title">--- Zeus_DNS-CLI ---</span>
+  <div class="subtitle">Configure Upstreams</div>
+
+  <div class="row"><span class="nc">&nbsp;</span><span class="idx">1.</span><span class="res">https://dns.controld.com/p2</span><span class="primary badge">[primary]</span><span class="tag">DoH</span><span class="ok">✓</span></div>
+  <div class="row"><span class="cursor">&gt;&nbsp;</span><span class="idx">2.</span><span class="res">tls://dns.adguard.com</span><span class="fallback badge">[fallback]</span><span class="tag">DoT</span><span class="err">✗ i/o timeout</span></div>
+  <div class="row"><span class="nc">&nbsp;</span><span class="idx">3.</span><span class="res">https://doh.pub/dns-query</span><span class="fallback badge">[fallback]</span><span class="tag">DoH</span></div>
+
+  <div class="pending">testing...</div>
+
+  <div class="footer">[a]dd  [d]elete  [[]move up  ]]move down  [t]est all  [s]ave  [q]uit</div>
+</div>
+
+<div class="screen">
+  <div class="h">zeusdns configure — add mode</div>
+  <span class="title">--- Zeus_DNS-CLI ---</span>
+  <div class="subtitle">Add a resolver</div>
+  <div class="input"><span class="caret">&gt;&nbsp;</span> tls://dns.adguard.com</div>
+  <div class="hint">enter = validate &amp; add   esc = cancel</div>
+</div>
+
+<div class="screen">
+  <div class="h">zeusdns — first-run wizard (huh form)</div>
+  <span class="title">--- Zeus_DNS-CLI ---</span>
+  <div style="margin:16px 0">
+    <div style="margin:10px 0">Would you like to install?</div>
+    <div style="margin:6px 0"><span class="primary">► Yes</span> &nbsp; <span class="nc">No</span></div>
+  </div>
+  <div style="margin:16px 0 6px">Provide your DNS Resolver: DoH/DoT</div>
+  <div class="input">https://dns.controld.com/p2<span class="caret">▏</span></div>
+  <div style="color:var(--gray);font-size:12px;margin:4px 0 18px">e.g. https://dns.controld.com/p2</div>
+  <div style="margin:6px">Fallback DNS Resolver (Enter empty is fine)</div>
+  <div class="input">tls://dns.adguard.com<span class="caret">▏</span></div>
+  <div style="margin-top:22px">
+    <span style="border:1px solid #2a4a2a;background:#0a1a0a;color:var(--green);padding:4px 14px;border-radius:4px">Submit</span>
+  </div>
+</div>
+
+<div class="screen">
+  <div class="h">zeusdns — post-wizard install output</div>
+  <div style="color:#e6e6e6">Configuring...</div>
+  <div><span class="ok">✓</span> writing config</div>
+  <div><span class="ok">✓</span> installing service</div>
+  <div><span class="ok">✓</span> starting service</div>
+  <div style="margin-top:14px"><span class="ok">Done!!!</span></div>
+  <div class="hint">Enter To Exit: ▏</div>
+</div>
+
+</body></html>
