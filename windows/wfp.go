@@ -36,8 +36,6 @@ func (p *LoopbackProtector) Enable() error {
 	if err != nil {
 		return fmt.Errorf("open WFP session: %w", err)
 	}
-	p.session = s
-
 	guid, err := win.GenerateGUID()
 	if err != nil {
 		_ = s.Close()
@@ -64,6 +62,7 @@ func (p *LoopbackProtector) Enable() error {
 			return fmt.Errorf("add WFP rule %q: %w", r.Name, err)
 		}
 	}
+	p.session = s
 	p.enabled = true
 	return nil
 }
