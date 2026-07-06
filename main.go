@@ -128,8 +128,8 @@ func printUsage() {
 Usage:
   zeusdns                       first-run setup (or status if already configured)
   zeusdns configure             manage upstream resolvers (interactive TUI)
-  zeusdns install               install & start the Windows service
-  zeusdns uninstall             stop, restore system DNS, remove the service
+  zeusdns install               install & start the service (binary -> %s, added to PATH)
+  zeusdns uninstall             stop, restore system DNS, remove service + binary + PATH entry
   zeusdns start                 start the service
   zeusdns stop                  stop the service (restores system DNS)
   zeusdns restart               restart the service (re-reads config)
@@ -145,5 +145,5 @@ Flags:
 
 Resolver formats: https://host/path (DoH)  or  tls://host[:853] (DoT)
 Config directory:  %s
-`, cmd.Version, config.DefaultFile, config.DefaultDir)
+`, cmd.Version, config.InstallDir, config.DefaultFile, config.DefaultDir)
 }

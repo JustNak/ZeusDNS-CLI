@@ -53,28 +53,32 @@ func TestIsAddrInUseDistinguishesErrno(t *testing.T) {
 }
 
 func TestServiceBinPath(t *testing.T) {
-	// default config -> just the exe, no -c args
+	// The registered binPath is ALWAYS the canonical install path — never
+	// os.Executable() — so the service survives the user's build/Downloads
+	// folder being moved or deleted, and self-update swaps the right file.
 	exe, args, err := serviceBinPath(config.DefaultFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if exe == "" {
-		t.Error("exe path should be non-empty")
+	if want := config.InstallPath(); exe != want {
+		t.Errorf("exe path = %q, want install path %q", exe, want)
 	}
 	if len(args) != 0 {
 		t.Errorf("default config must not add -c args, got: %v", args)
 	}
 
 	// empty configPath -> same as default (no -c)
-	_, argsEmpty, _ := serviceBinPath("")
-	if len(argsEmpty) != 0 {
-		t.Errorf("empty configPath must not add -c args, got: %v", argsEmpty)
+	if exe2, _, _ := serviceBinPath(""); exe2 != config.InstallPath() {
+		t.Errorf("empty configPath exe = %q, want %q", exe2, config.InstallPath())
 	}
 
-	// custom config -> exe + ["-c", path]
-	_, argsCustom, err := serviceBinPath(`C:\custom\config.yaml`)
+	// custom config -> install-path exe + ["-c", path]
+	exeC, argsCustom, err := serviceBinPath(`C:\custom\config.yaml`)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if exeC != config.InstallPath() {
+		t.Errorf("custom config exe = %q, want %q", exeC, config.InstallPath())
 	}
 	if len(argsCustom) != 2 || argsCustom[0] != "-c" || argsCustom[1] != `C:\custom\config.yaml` {
 		t.Errorf("custom config should return [-c path], got: %v", argsCustom)

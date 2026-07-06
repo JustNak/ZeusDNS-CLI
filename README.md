@@ -5,7 +5,11 @@ server on `127.0.0.1:53` that forwards queries to an ordered list of **DoH**
 and **DoT** upstreams, sets `127.0.0.1` as your system DNS while running, and
 installs a WFP filter so a VPN's "block outside DNS" rule doesn't kill it.
 
-Single binary. One command, `zeusdns`, available from any terminal.
+Single binary. One command, `zeusdns`, available from any terminal **after you run
+`zeusdns install` once** — install promotes the binary to
+`C:\Program Files\ZeusDNS\` and puts that directory on your system PATH.
+(Before install, `zeusdns` only resolves from the folder you built/extracted it
+in.)
 
 Inspired by [ctrld](https://github.com/Control-D-Inc/ctrld) (policy engine) and
 [AdGuard DNS CLI](https://github.com/AdguardTeam/AdGuardDNSCLI) (minimal
@@ -55,13 +59,35 @@ Done!!!, Enter To Exit:
 From then on, `zeusdns` (no args) shows status. Edit upstreams any time with
 `zeusdns configure`.
 
+### What `install` actually does
+
+1. **Promotes the binary** to `C:\Program Files\ZeusDNS\zeusdns.exe` — the
+   service is registered against *that* path, not wherever you ran `install`
+   from. So deleting your build/Downloads folder later doesn't brick the
+   service.
+2. **Installs + starts** the Windows service (as before).
+3. **Adds** `C:\Program Files\ZeusDNS` to the **system PATH** (machine-level).
+
+The PATH change only takes effect in terminals you **open after** `install`; the
+shell you ran it in keeps its old env until you start a new one.
+
+`uninstall` reverses all three: stops the service, restores your system DNS,
+removes the service, deletes the promoted binary, and drops the PATH entry.
+
+### Self-update
+
+`zeusdns update` swaps the installed binary at
+`C:\Program Files\ZeusDNS\zeusdns.exe` (never the binary you happened to
+launch), so a reboot's service start runs the new code. It refuses if no
+installed binary exists — run `zeusdns install` first.
+
 ## Commands
 
 ```
 zeusdns                       first-run setup (or status if configured)
 zeusdns configure             manage upstream resolvers (TUI)
-zeusdns install               install & start the Windows service
-zeusdns uninstall             stop, restore system DNS, remove the service
+zeusdns install               install & start the service (binary -> Program Files\ZeusDNS, added to PATH)
+zeusdns uninstall             stop, restore system DNS, remove service + binary + PATH entry
 zeusdns start | stop | restart   control the service
 zeusdns status                show service + config status
 zeusdns run                   run the server in the foreground (Ctrl+C)

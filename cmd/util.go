@@ -7,11 +7,13 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/JustNak/ZeusDNS-CLI/config"
 	"github.com/JustNak/ZeusDNS-CLI/windows"
@@ -59,8 +61,13 @@ func requireAdmin(action string) bool {
 	return false
 }
 
-// serviceBinPath returns the absolute executable path and the extra args
-// to pass to CreateService. CreateService builds the registered binPath as
+// serviceBinPath returns the canonical install path of the binary plus the
+// extra args to pass to CreateService. The registered binPath is ALWAYS
+// config.InstallPath() — never os.Executable() — so the service keeps running
+// after the user deletes their build/Downloads folder. Install is responsible
+// for promoting the binary there first (see promoteBinary).
+//
+// CreateService builds the registered binPath as
 // EscapeArg(exe) + " " + EscapeArg(arg)... so the exe must be passed
 // separately from flags (passing `"exe" -c "cfg"` as one string gets
 // mangled into a single quoted blob and the SCM can't find the file).
@@ -69,15 +76,65 @@ func requireAdmin(action string) bool {
 // it, `zeusdns install -c custom.yaml` would preflight custom's port but the
 // service would run against the default config (port 53).
 func serviceBinPath(configPath string) (exe string, args []string, err error) {
-	exe, err = os.Executable()
-	if err != nil {
-		return "", nil, err
-	}
-	exe, _ = filepath.Abs(exe)
+	exe = config.InstallPath()
 	if configPath != "" && configPath != config.DefaultFile {
 		args = []string{"-c", configPath}
 	}
 	return exe, args, nil
+}
+
+// promoteBinary copies the running executable to the canonical install
+// location (config.InstallPath) so the registered service points at a stable
+// path that doesn't move when the user deletes their build or Downloads
+// folder. Idempotent: copying onto itself is a no-op. The install directory is
+// created if missing. Requires admin (writing under %ProgramFiles%).
+func promoteBinary() (string, error) {
+	src, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate running binary: %w", err)
+	}
+	src, _ = filepath.Abs(src)
+	dst := config.InstallPath()
+	if samePath(src, dst) {
+		return dst, nil // already running from the install location
+	}
+	if err := os.MkdirAll(config.InstallDir, 0o755); err != nil {
+		return "", fmt.Errorf("create %s: %w (need admin?)", config.InstallDir, err)
+	}
+	if err := copyFile(src, dst); err != nil {
+		return "", fmt.Errorf("copy binary to %s: %w", dst, err)
+	}
+	return dst, nil
+}
+
+// copyFile copies src to dst, truncating dst if it exists. Mode is taken from
+// src so the installed binary keeps the build's permissions.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// samePath reports whether two paths are the same file, case-insensitively
+// (Windows filesystems are case-insensitive). Used by promoteBinary to skip
+// the copy when the binary is already running from the install location.
+func samePath(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
 // Preflight checks that the local DNS port is free before the service binds it.
@@ -85,19 +142,50 @@ func serviceBinPath(configPath string) (exe string, args []string, err error) {
 // 127.0.0.1:53 — it returns a human-readable error naming the likely culprit,
 // instead of letting the service install and crash-loop on bind.
 //
+// A retry loop (up to 6 tries × 300 ms backoff) is used when the bind fails
+// with "address already in use". This gives the OS time to release a socket
+// left by a just-stopped ZeusDNS service during self-restart/reinstall — the
+// socket may linger briefly in TIME_WAIT or cleanup lag before the port is
+// genuinely free. Non-address-in-use errors (access denied, bad address, etc.)
+// fail fast on the first attempt.
+//
 // Access-denied errors (Windows excluded port ranges) are ignored: the CLI
 // process may lack the rights to bind port 53 even though the service (running
 // as LocalSystem) can.
 func Preflight(addr string) error {
-	if pc, err := net.ListenPacket("udp", addr); err == nil {
-		_ = pc.Close()
-	} else if isAddrInUse(err) {
-		return fmt.Errorf("UDP %s already in use — is ctrld or another DNS server running? Stop it first", addr)
+	const maxRetries = 6
+	const retryDelay = 300 * time.Millisecond
+
+	// UDP probe with retry-on-EADDRINUSE
+	for i := 0; i < maxRetries; i++ {
+		pc, err := net.ListenPacket("udp", addr)
+		if err == nil {
+			_ = pc.Close()
+			break // port free, continue to TCP
+		}
+		if !isAddrInUse(err) {
+			return err // fail fast on permission-denied, bad addr, etc.
+		}
+		if i == maxRetries-1 {
+			return fmt.Errorf("UDP %s already in use — is ctrld or another DNS server running? Stop it first", addr)
+		}
+		time.Sleep(retryDelay)
 	}
-	if l, err := net.Listen("tcp", addr); err == nil {
-		_ = l.Close()
-	} else if isAddrInUse(err) {
-		return fmt.Errorf("TCP %s already in use — is ctrld or another DNS server running? Stop it first", addr)
+
+	// TCP probe with retry-on-EADDRINUSE
+	for i := 0; i < maxRetries; i++ {
+		l, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = l.Close()
+			return nil
+		}
+		if !isAddrInUse(err) {
+			return err
+		}
+		if i == maxRetries-1 {
+			return fmt.Errorf("TCP %s already in use — is ctrld or another DNS server running? Stop it first", addr)
+		}
+		time.Sleep(retryDelay)
 	}
 	return nil
 }
