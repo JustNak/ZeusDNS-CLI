@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,23 +43,27 @@ type validateAddMsg struct {
 	raw string
 }
 
+type clearDeletePendingMsg struct{}
+
 type configureModel struct {
-	upstreams   []string
-	results     map[int]testResult
-	pendingTest int
-	cursor      int
-	mode        configureMode
-	addInput    textinput.Model
-	validateErr string
-	saved       bool
-	quitting    bool
+	upstreams     []string
+	results       map[int]testResult
+	pendingTest   int
+	cursor        int
+	deletePending int
+	mode          configureMode
+	addInput      textinput.Model
+	validateErr   string
+	saved         bool
+	quitting      bool
 }
 
 func initialConfigureModel(current []string) configureModel {
 	m := configureModel{
-		upstreams: append([]string(nil), current...),
-		results:   map[int]testResult{},
-		mode:      modeList,
+		upstreams:     append([]string(nil), current...),
+		results:       map[int]testResult{},
+		deletePending: -1,
+		mode:          modeList,
 	}
 	ti := textinput.New()
 	ti.Placeholder = "https://dns.controld.com/p2   or   tls://dns.adguard.com"
@@ -90,6 +95,10 @@ func (m configureModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.validateErr = msg.err
 		m.mode = modeAdd
+		return m, nil
+
+	case clearDeletePendingMsg:
+		m.deletePending = -1
 		return m, nil
 
 	case tea.KeyMsg:
@@ -130,6 +139,15 @@ func (m configureModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// modeList
+	// Clean up pending delete on any key except 'd'/'x'.
+	if m.deletePending >= 0 {
+		switch msg.String() {
+		case "d", "x":
+			// handled below
+		default:
+			m.deletePending = -1
+		}
+	}
 	switch msg.String() {
 	case "ctrl+c", "q", "esc":
 		m.quitting = true
@@ -151,27 +169,37 @@ func (m configureModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.addInput.Focus()
 		return m, textinput.Blink
 	case "d", "x":
-		if len(m.upstreams) <= 1 {
-			return m, nil
+		if m.deletePending < 0 {
+			// First 'd' — set pending, start 1s timeout
+			if len(m.upstreams) <= 1 {
+				return m, nil
+			}
+			m.deletePending = m.cursor
+			return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+				return clearDeletePendingMsg{}
+			})
 		}
-		m.upstreams = append(m.upstreams[:m.cursor], m.upstreams[m.cursor+1:]...)
-		for i := range m.results { // results are index-relative; drop stale ones
-			if i >= m.cursor {
-				delete(m.results, i)
+		if m.deletePending == m.cursor && len(m.upstreams) > 1 {
+			m.upstreams = append(m.upstreams[:m.cursor], m.upstreams[m.cursor+1:]...)
+			m.results = map[int]testResult{} // fix 2: clear stale results on structural change
+			if m.cursor >= len(m.upstreams) {
+				m.cursor = len(m.upstreams) - 1
 			}
 		}
-		if m.cursor >= len(m.upstreams) {
-			m.cursor = len(m.upstreams) - 1
-		}
+		m.deletePending = -1
 	case "[":
 		if m.cursor > 0 {
 			m.upstreams[m.cursor-1], m.upstreams[m.cursor] = m.upstreams[m.cursor], m.upstreams[m.cursor-1]
 			m.cursor--
+			m.results = map[int]testResult{}              // fix 2: clear stale results on structural change
+			return m, checkUpstreamCmd(0, m.upstreams[0]) // fix 3: re-test new primary
 		}
 	case "]":
 		if m.cursor < len(m.upstreams)-1 {
 			m.upstreams[m.cursor+1], m.upstreams[m.cursor] = m.upstreams[m.cursor], m.upstreams[m.cursor+1]
 			m.cursor++
+			m.results = map[int]testResult{}              // fix 2: clear stale results on structural change
+			return m, checkUpstreamCmd(0, m.upstreams[0]) // fix 3: re-test new primary
 		}
 	case "t":
 		if len(m.upstreams) == 0 {
@@ -275,6 +303,9 @@ func (m configureModel) View() string {
 		b.WriteString(YellowStyle.Render("testing...") + "\n\n")
 	}
 	b.WriteString(DimStyle.Render("  [a]dd  [d]elete  [[]move up  ]]move down  [t]est all  [s]ave  [q]uit"))
+	if m.deletePending >= 0 && m.deletePending < len(m.upstreams) {
+		b.WriteString("\n" + YellowStyle.Render("  press d again to delete "+truncate(m.upstreams[m.deletePending], 40)))
+	}
 	return b.String()
 }
 
