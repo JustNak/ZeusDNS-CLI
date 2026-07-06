@@ -74,11 +74,15 @@ func Run(ctx context.Context, configPath string, verbose bool) error {
 	}
 
 	// srv.Start blocks until ctx is canceled (service stop or Ctrl+C).
-	if err := srv.Start(ctx); err != nil {
-		log.Error("dns server exited", "err", err)
+	startErr := srv.Start(ctx)
+	if startErr != nil {
+		log.Error("dns server exited", "err", startErr)
 	}
 	log.Info("zeusdns stopping")
 	cleanup(log, cfg, wfp)
+	if startErr != nil {
+		return fmt.Errorf("dns server: %w", startErr)
+	}
 	return nil
 }
 

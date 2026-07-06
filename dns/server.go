@@ -100,6 +100,7 @@ func (s *Server) Stop() error {
 
 // ServeDNS handles one query: cache lookup, then ordered upstream failover.
 func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	start := time.Now()
 	if len(r.Question) > 0 {
 		if s.queryLog {
 			q := r.Question[0]
@@ -127,7 +128,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		s.cache.Put(r, resp)
 		if s.queryLog {
-			s.log.Info("answered", "resolver", s.upstreams[i].Raw, "rcode", dns.RcodeToString[resp.Rcode], slog.Duration("level", 0))
+			s.log.Info("answered", "resolver", s.upstreams[i].Raw, "rcode", dns.RcodeToString[resp.Rcode], slog.Duration("duration", time.Since(start)))
 		}
 		_ = w.WriteMsg(resp)
 		return

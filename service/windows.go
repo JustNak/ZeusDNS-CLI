@@ -9,6 +9,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -68,7 +69,9 @@ func Uninstall() error {
 	}
 	defer s.Close()
 
-	_ = stopAndWait(s) // best-effort: ignore "not running" errors
+	if err := stopAndWait(s); err != nil {
+		return fmt.Errorf("stop service: %w (refusing to delete a running service; stop it manually and retry)", err)
+	}
 	if err := s.Delete(); err != nil {
 		return fmt.Errorf("delete service: %w", err)
 	}
@@ -175,8 +178,15 @@ func stateString(s svc.State) string {
 }
 
 func isNotRunning(err error) bool {
-	// Tolerate "service not running" / "not started" style errors on stop.
-	return err != nil
+	// Tolerate only the genuine "service not running" / "does not exist" errors.
+	if err == nil {
+		return false
+	}
+	var errno windows.Errno
+	if errors.As(err, &errno) {
+		return errno == windows.ERROR_SERVICE_NOT_ACTIVE || errno == windows.ERROR_SERVICE_DOES_NOT_EXIST
+	}
+	return false
 }
 
 // Run is the service entry point. It is called only when the process is
@@ -196,7 +206,14 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, changes cha
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- h.run(ctx) }()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("run panic: %v", r)
+			}
+		}()
+		done <- h.run(ctx)
+	}()
 
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
@@ -214,11 +231,13 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, changes cha
 				return false, 0
 			}
 		case err := <-done:
-			// run exited on its own (error); report stopped.
-			_ = err
+			// run exited on its own; surface any error to the SCM.
 			changes <- svc.Status{State: svc.StopPending}
 			cancel()
 			changes <- svc.Status{State: svc.Stopped}
+			if err != nil {
+				return false, 1
+			}
 			return false, 0
 		}
 	}
