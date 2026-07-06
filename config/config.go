@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +26,13 @@ const (
 	InstallDir  = `C:\Program Files\ZeusDNS`
 	BinaryName  = "zeusdns.exe"
 )
+
+// InstallPath returns the canonical on-disk location of the installed binary:
+// InstallDir + BinaryName. The service is registered against this path (not
+// the path the user happened to run `zeusdns install` from), so it survives
+// the build/Downloads folder being moved or deleted, and self-update swaps
+// this copy instead of whichever binary happened to be launched.
+func InstallPath() string { return filepath.Join(InstallDir, BinaryName) }
 
 // Config is the full on-disk configuration.
 type Config struct {
@@ -94,11 +102,15 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	applyEnv(cfg)
+	if err := applyEnv(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
 // Save writes the config to path, creating parent directories as needed.
+// The write is atomic: data is written to a temp file first, then renamed over
+// path, so concurrent readers never see a partial file.
 func (c *Config) Save(path string) error {
 	if path == "" {
 		path = DefaultFile
@@ -110,7 +122,35 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".zeusdns-config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanupTmp = false
+	return nil
 }
 
 // Validate checks the config is usable: at least one upstream and a valid port.
@@ -118,11 +158,11 @@ func (c *Config) Validate() error {
 	if len(c.Upstreams) == 0 {
 		return fmt.Errorf("no upstreams configured")
 	}
-	if c.Listener.Port <= 0 || c.Listener.Port > 65535 {
-		return fmt.Errorf("listener port %d out of range", c.Listener.Port)
+	if c.Listener.Port < 1 || c.Listener.Port > 65535 {
+		return fmt.Errorf("invalid listener port %d (want 1-65535)", c.Listener.Port)
 	}
-	if c.Listener.IP == "" {
-		return fmt.Errorf("listener ip is empty")
+	if net.ParseIP(c.Listener.IP) == nil {
+		return fmt.Errorf("invalid listener IP %q", c.Listener.IP)
 	}
 	return nil
 }
@@ -131,7 +171,7 @@ func (c *Config) Validate() error {
 func (c *Config) Addr() string { return fmt.Sprintf("%s:%d", c.Listener.IP, c.Listener.Port) }
 
 // applyEnv overlays ZEUSDNS_* environment variables on top of file/defaults.
-func applyEnv(c *Config) {
+func applyEnv(c *Config) error {
 	if v := os.Getenv("ZEUSDNS_UPSTREAMS"); v != "" {
 		c.Upstreams = splitCSV(v)
 	}
@@ -139,14 +179,18 @@ func applyEnv(c *Config) {
 		c.Listener.IP = v
 	}
 	if v := os.Getenv("ZEUSDNS_LISTENER_PORT"); v != "" {
-		if p, err := strconv.Atoi(v); err == nil {
-			c.Listener.Port = p
+		p, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("env ZEUSDNS_LISTENER_PORT: invalid integer %q", v)
 		}
+		c.Listener.Port = p
 	}
 	if v := os.Getenv("ZEUSDNS_CACHE_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			c.Cache.Size = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("env ZEUSDNS_CACHE_SIZE: invalid integer %q", v)
 		}
+		c.Cache.Size = n
 	}
 	if v := os.Getenv("ZEUSDNS_LOG_LEVEL"); v != "" {
 		c.Log.Level = v
@@ -160,6 +204,7 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("ZEUSDNS_WINDOWS_WFP_LOOPBACK_PROTECT"); v != "" {
 		c.Windows.WFPLoopbackProtect = parseBool(v)
 	}
+	return nil
 }
 
 func splitCSV(s string) []string {
