@@ -40,42 +40,104 @@ type ghAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// LatestVersion returns the latest release tag (without a leading "v").
-func LatestVersion(ctx context.Context) (string, error) {
+// fetchLatestRelease fetches the latest release metadata from GitHub.
+func fetchLatestRelease(ctx context.Context) (*ghRelease, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		"https://api.github.com/repos/"+Repo+"/releases/latest", nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("github api returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("github api returned %d", resp.StatusCode)
 	}
 	var r ghRelease
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// LatestVersion returns the latest release tag (without a leading "v").
+func LatestVersion(ctx context.Context) (string, error) {
+	r, err := fetchLatestRelease(ctx)
+	if err != nil {
 		return "", err
 	}
 	return strings.TrimPrefix(r.TagName, "v"), nil
 }
 
-// Update checks for a newer release than currentVersion and, if found,
-// downloads and swaps the binary. It stops and restarts the service around
-// the swap if the service is installed.
+// parseSemver parses a "X.Y.Z" version string into 3 ints (missing segments
+// treated as 0). It returns nil if any segment is non-numeric, in which case
+// the caller should treat the version as non-semver (e.g. "dev") and skip
+// semver comparison entirely rather than guessing via string compare (which
+// would rank "dev" > "1.2.3" byte-wise and mis-block dev=>release updates).
+func parseSemver(s string) []int {
+	parts := strings.Split(s, ".")
+	nums := make([]int, 0, 3)
+	for _, p := range parts {
+		var n int
+		if _, err := fmt.Sscanf(p, "%d", &n); err != nil {
+			return nil // non-numeric segment
+		}
+		nums = append(nums, n)
+	}
+	for len(nums) < 3 {
+		nums = append(nums, 0)
+	}
+	return nums
+}
+
+// isSemver reports whether s is a pure-numeric "X.Y[.Z]" version.
+func isSemver(s string) bool { return parseSemver(s) != nil }
+
+// compareVersion compares two SEMVER strings ("X.Y.Z", tolerating missing
+// segments as 0). Returns -1 if a < b, 0 if equal, 1 if a > b.
+// Callers must gate on isSemver for both args first: non-semver versions
+// ("dev", pre-release tags) have no meaningful ordering and must be skipped,
+// not string-compared.
+func compareVersion(a, b string) int {
+	an := parseSemver(a)
+	bn := parseSemver(b)
+	for i := 0; i < 3; i++ {
+		if an[i] < bn[i] {
+			return -1
+		}
+		if an[i] > bn[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+// Update checks for a newer release than currentVersion and, if found, downloads
+// and swaps the INSTALLED binary at config.InstallPath (never the running exe,
+// so it behaves the same whether launched from the install path or a dev
+// build). It refuses if no installed binary exists. It stops and restarts the
+// service around the swap if it was running.
 func Update(ctx context.Context, currentVersion string) (string, error) {
-	latest, err := LatestVersion(ctx)
+	rel, err := fetchLatestRelease(ctx)
 	if err != nil {
 		return "", err
 	}
+	latest := strings.TrimPrefix(rel.TagName, "v")
+
 	if latest == currentVersion {
 		return "already up to date (" + currentVersion + ")", nil
 	}
+	// Downgrade guard: only when BOTH versions are real semver. Non-semver
+	// current ("dev" builds) bypasses the guard so a dev build may update to
+	// any real release; the equality case above already short-circuits same-version.
+	if isSemver(currentVersion) && isSemver(latest) && compareVersion(currentVersion, latest) > 0 {
+		return "", fmt.Errorf("refusing downgrade: installed %s is newer than latest %s", currentVersion, latest)
+	}
 
-	assetURL, assetName, err := findAssetURL(ctx, latest)
+	assetURL, assetName, err := findAsset(rel, runtime.GOARCH)
 	if err != nil {
 		return "", err
 	}
@@ -92,11 +154,10 @@ func Update(ctx context.Context, currentVersion string) (string, error) {
 	}
 	defer os.Remove(newExe)
 
-	binPath, err := os.Executable()
-	if err != nil {
-		return "", err
+	binPath := config.InstallPath()
+	if _, err := os.Stat(binPath); err != nil {
+		return "", fmt.Errorf("no installed binary at %s: run `zeusdns install` first (%w)", binPath, err)
 	}
-	binPath, _ = filepath.Abs(binPath)
 
 	// Stop the service if present so its file handle releases.
 	svcRunning := false
@@ -115,8 +176,13 @@ func Update(ctx context.Context, currentVersion string) (string, error) {
 		_ = os.Rename(oldPath, binPath)
 		return "", fmt.Errorf("install new binary: %w", err)
 	}
-	// The .old image is still locked by this running process; delete on reboot.
-	_ = win.MoveFileEx(win.StringToUTF16Ptr(oldPath), nil, win.MOVEFILE_DELAY_UNTIL_REBOOT)
+	// The service was stopped before the rename, so .old is not mapped to any
+	// running process and is normally deletable. Try a direct remove first;
+	// only fall back to MOVEFILE_DELAY_UNTIL_REBOOT if the filesystem or a
+	// scanner (AV) prevents deletion.
+	if err := os.Remove(oldPath); err != nil {
+		_ = win.MoveFileEx(win.StringToUTF16Ptr(oldPath), nil, win.MOVEFILE_DELAY_UNTIL_REBOOT)
+	}
 
 	if svcRunning {
 		_ = startService()
@@ -124,33 +190,14 @@ func Update(ctx context.Context, currentVersion string) (string, error) {
 	return fmt.Sprintf("updated %s -> %s", currentVersion, latest), nil
 }
 
-func findAssetURL(ctx context.Context, version string) (url, name string, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.github.com/repos/"+Repo+"/releases/latest", nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("github api returned %d", resp.StatusCode)
-	}
-	var r ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", "", err
-	}
-	arch := runtime.GOARCH
+func findAsset(r *ghRelease, arch string) (url, name string, err error) {
 	for _, a := range r.Assets {
 		low := strings.ToLower(a.Name)
 		if strings.Contains(low, "windows") && strings.Contains(low, arch) {
 			return a.BrowserDownloadURL, a.Name, nil
 		}
 	}
-	return "", "", fmt.Errorf("no windows/%s asset in release %s (assets: %v)", arch, version, assetNames(r.Assets))
+	return "", "", fmt.Errorf("no windows/%s asset in release %s (assets: %v)", arch, strings.TrimPrefix(r.TagName, "v"), assetNames(r.Assets))
 }
 
 func assetNames(as []ghAsset) string {
