@@ -28,6 +28,9 @@ type Server struct {
 
 	udp *dns.Server
 	tcp *dns.Server
+
+	serveCtx    context.Context
+	serveCancel context.CancelFunc
 }
 
 // NewServer parses the configured upstreams and prepares the local server.
@@ -102,6 +105,9 @@ func (s *Server) Listen() error {
 // Serve blocks until ctx is done or a fatal error occurs. It returns nil on
 // a clean shutdown. Listen() must be called before Serve().
 func (s *Server) Serve(ctx context.Context) error {
+	s.serveCtx, s.serveCancel = context.WithCancel(ctx)
+	defer s.serveCancel()
+
 	errCh := make(chan error, 2)
 	go func() { errCh <- s.udp.ActivateAndServe() }()
 	go func() { errCh <- s.tcp.ActivateAndServe() }()
@@ -157,6 +163,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop shuts both listeners without canceling in-flight replies.
 func (s *Server) Stop() error {
+	if s.serveCancel != nil {
+		s.serveCancel()
+	}
 	if s.udp != nil {
 		_ = s.udp.Shutdown()
 	}
@@ -184,7 +193,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	r.RecursionDesired = true
 	for i, ex := range s.exchangers {
-		ctx, cancel := context.WithTimeout(context.Background(), perQueryTimeout)
+		ctx, cancel := context.WithTimeout(s.serveCtx, perQueryTimeout)
 		resp, err := ex.Exchange(ctx, r)
 		cancel()
 		if err != nil {
