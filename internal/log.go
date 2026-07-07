@@ -42,14 +42,14 @@ func NewLogger(level, path string, console bool) (*Logger, error) {
 
 	switch {
 	case path != "" && console:
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 		if err != nil {
 			return nil, err
 		}
 		file = f
 		w = io.MultiWriter(f, os.Stdout)
 	case path != "":
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 		if err != nil {
 			return nil, err
 		}

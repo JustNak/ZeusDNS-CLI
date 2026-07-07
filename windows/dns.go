@@ -134,14 +134,14 @@ func SaveSystemDNS() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(config.DefaultDir, 0o755); err != nil {
+	if err := os.MkdirAll(config.DefaultDir, 0o750); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(config.PrevDNSFile, data, 0o644)
+	return os.WriteFile(config.PrevDNSFile, data, 0o640)
 }
 
 // GetBootstrapDNS returns the current system DNS server IPs suitable for use

@@ -115,7 +115,7 @@ func (c *Config) Save(path string) error {
 	if path == "" {
 		path = DefaultFile
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
 	data, err := yaml.Marshal(c)
@@ -143,7 +143,7 @@ func (c *Config) Save(path string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
+	if err := os.Chmod(tmpName, 0o640); err != nil {
 		return err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
