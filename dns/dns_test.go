@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"crypto/tls"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -103,5 +104,46 @@ func TestCacheEviction(t *testing.T) {
 	q2.SetQuestion(fmtName(2), dns.TypeA)
 	if _, ok := c.Get(q2); !ok {
 		t.Fatal("newest entry should still be present")
+	}
+}
+
+func TestDotClientPoolSize(t *testing.T) {
+	u, err := ParseUpstream("tls://dns.example.com:853")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := newDoTClient(u, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap(c.pool) != dotPoolSize {
+		t.Errorf("pool cap = %d, want %d", cap(c.pool), dotPoolSize)
+	}
+	if cap(c.sem) != dotPoolSize {
+		t.Errorf("sem cap = %d, want %d", cap(c.sem), dotPoolSize)
+	}
+	if len(c.pool) != 0 {
+		t.Errorf("pool should start empty, has %d connections", len(c.pool))
+	}
+	if len(c.sem) != 0 {
+		t.Errorf("sem should start empty, has %d slots acquired", len(c.sem))
+	}
+	if c.host != "dns.example.com" {
+		t.Errorf("host = %q, want %q", c.host, "dns.example.com")
+	}
+	if c.port != "853" {
+		t.Errorf("port = %q, want %q", c.port, "853")
+	}
+	if c.tls == nil {
+		t.Fatal("tls config is nil")
+	}
+	if c.tls.ServerName != "dns.example.com" {
+		t.Errorf("tls.ServerName = %q, want %q", c.tls.ServerName, "dns.example.com")
+	}
+	if c.tls.MinVersion != tls.VersionTLS12 {
+		t.Errorf("tls.MinVersion = %v, want %v", c.tls.MinVersion, tls.VersionTLS12)
+	}
+	if c.resolver != nil {
+		t.Errorf("resolver should be nil, got %v", c.resolver)
 	}
 }
