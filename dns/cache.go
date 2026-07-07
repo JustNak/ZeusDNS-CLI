@@ -53,6 +53,27 @@ func minTTL(r *dns.Msg) uint32 {
 	return min
 }
 
+// negativeTTL returns the RFC 2308 negative-cache TTL from the SOA in the
+// authority section, clamped to [30, 3600], or 0 if no SOA is present.
+func negativeTTL(r *dns.Msg) uint32 {
+	for _, rr := range r.Ns {
+		if soa, ok := rr.(*dns.SOA); ok {
+			ttl := soa.Hdr.Ttl
+			if soa.Minttl < ttl {
+				ttl = soa.Minttl
+			}
+			if ttl < 30 {
+				ttl = 30
+			}
+			if ttl > 3600 {
+				ttl = 3600
+			}
+			return ttl
+		}
+	}
+	return 0
+}
+
 // Get returns a cached response for the query if present and unexpired.
 // The returned message has its Id set to match the query.
 func (c *Cache) Get(q *dns.Msg) (*dns.Msg, bool) {
@@ -84,14 +105,20 @@ func (c *Cache) Get(q *dns.Msg) (*dns.Msg, bool) {
 // Put stores a response, keyed by its first question, for the minimum record
 // TTL (clamped to 30s..1h). Responses with no TTL information are not cached.
 func (c *Cache) Put(q, r *dns.Msg) {
-	if c.size <= 0 || r == nil || r.Rcode != dns.RcodeSuccess {
+	if c.size <= 0 || r == nil || (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) {
 		return
 	}
 	key, ok := cacheKey(q)
 	if !ok {
 		return
 	}
-	ttl := minTTL(r)
+
+	var ttl uint32
+	if r.Rcode == dns.RcodeNameError || len(r.Answer) == 0 {
+		ttl = negativeTTL(r)
+	} else {
+		ttl = minTTL(r)
+	}
 	if ttl == 0 {
 		return
 	}
