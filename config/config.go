@@ -164,6 +164,12 @@ func (c *Config) Validate() error {
 	if net.ParseIP(c.Listener.IP) == nil {
 		return fmt.Errorf("invalid listener IP %q", c.Listener.IP)
 	}
+	for _, raw := range c.Upstreams {
+		s := strings.ToLower(strings.TrimSpace(raw))
+		if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "tls://") && !strings.HasPrefix(s, "dot://") {
+			return fmt.Errorf("upstream %q: must be https:// (DoH) or tls:///dot:// (DoT)", raw)
+		}
+	}
 	return nil
 }
 
