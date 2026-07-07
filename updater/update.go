@@ -10,6 +10,7 @@ package updater
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -154,6 +155,11 @@ func Update(ctx context.Context, currentVersion string) (string, error) {
 	}
 	defer os.Remove(newExe)
 
+	// Verify integrity of the extracted binary before installing it.
+	if err := verifyCandidate(ctx, rel, assetName, newExe); err != nil {
+		return "", err
+	}
+
 	binPath := config.InstallPath()
 	if _, err := os.Stat(binPath); err != nil {
 		return "", fmt.Errorf("no installed binary at %s: run `zeusdns install` first (%w)", binPath, err)
@@ -270,6 +276,143 @@ func copyZipEntry(f *zip.File) (string, error) {
 		return "", err
 	}
 	return tmp.Name(), tmp.Close()
+}
+
+// checksumAssetNames returns the list of asset-name patterns to try for a
+// checksums file, given the downloaded asset's name. Order matters — the
+// first match wins, so common aggregate names are checked first.
+func checksumAssetNames(assetName string) []string {
+	stem := strings.TrimSuffix(assetName, filepath.Ext(assetName))
+	names := []string{
+		"checksums.txt",
+		"SHA256SUMS",
+		"sha256sums.txt",
+		"sha256sums",
+	}
+	for _, n := range []string{assetName, stem} {
+		names = append(names, n+".sha256", n+".sha256sum")
+	}
+	return names
+}
+
+// findChecksumAsset iterates release assets looking for a checksums file
+// matching one of the known patterns, in priority order. It returns the
+// download URL and the asset name, or an error if none is found.
+func findChecksumAsset(r *ghRelease, assetName string) (string, string, error) {
+	candidates := checksumAssetNames(assetName)
+	for _, c := range candidates {
+		for _, a := range r.Assets {
+			if strings.EqualFold(a.Name, c) {
+				return a.BrowserDownloadURL, a.Name, nil
+			}
+		}
+	}
+	return "", "", fmt.Errorf("no checksum asset found (tried %s)", strings.Join(candidates, ", "))
+}
+
+// verifyCandidate fetches the checksums asset for the release, parses
+// SHA256SUMS-format content to find the digest for the downloaded asset, and
+// verifies it matches the SHA-256 of the candidate binary. On failure the
+// candidate file is deleted and an error returned.
+func verifyCandidate(ctx context.Context, r *ghRelease, assetName, candidatePath string) error {
+	checksumURL, _, err := findChecksumAsset(r, assetName)
+	if err != nil {
+		os.Remove(candidatePath)
+		return fmt.Errorf("update integrity check failed: no checksums asset found in release; refusing to install unverified binary")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetch checksums returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	// Parse SHA256SUMS format (https://en.wikipedia.org/wiki/SHA256SUMS).
+	// Each non-empty line is one of:
+	//   <64hex>  <filename>     (two spaces — GNU text mode)
+	//   <64hex> *<filename>     (space+asterisk — GNU binary mode)
+	lines := strings.Split(string(body), "\n")
+	var expected string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var hash, fname string
+		switch {
+		case strings.Contains(line, "  "):
+			// Two-space separator: "<64hex>  <filename>"
+			idx := strings.Index(line, "  ")
+			hash = strings.TrimSpace(line[:idx])
+			fname = strings.TrimSpace(line[idx+2:])
+		case strings.Contains(line, " *"):
+			// Space+asterisk: "<64hex> *<filename>"
+			idx := strings.Index(line, " *")
+			hash = strings.TrimSpace(line[:idx])
+			fname = strings.TrimSpace(line[idx+2:])
+		default:
+			// Unrecognized format — skip this line.
+			continue
+		}
+		if len(hash) != 64 || !isHex(hash) {
+			continue
+		}
+		// Accept exact match or base-name match (in case the checksum line
+		// includes a path prefix like "./").
+		if strings.EqualFold(fname, assetName) || strings.EqualFold(filepath.Base(fname), assetName) {
+			expected = hash
+			break
+		}
+	}
+
+	if expected == "" {
+		os.Remove(candidatePath)
+		return fmt.Errorf("update integrity check failed: no checksum entry found for %s in release checksums", assetName)
+	}
+
+	// Compute SHA-256 of the candidate binary and compare.
+	data, err := os.ReadFile(candidatePath)
+	if err != nil {
+		return err
+	}
+	actual := sha256.Sum256(data)
+	actualHex := fmt.Sprintf("%x", actual)
+
+	if !strings.EqualFold(actualHex, expected) {
+		os.Remove(candidatePath)
+		return fmt.Errorf("update integrity check failed: sha256 mismatch (expected %s)", expected)
+	}
+
+	return nil
+}
+
+// isHex reports whether every character in s is a valid hex digit.
+func isHex(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case '0' <= c && c <= '9':
+		case 'a' <= c && c <= 'f':
+		case 'A' <= c && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // --- thin service helpers so updater doesn't import the service package ---
