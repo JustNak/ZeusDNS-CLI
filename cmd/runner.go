@@ -50,11 +50,6 @@ func Run(ctx context.Context, configPath string, verbose bool) error {
 		if err := windows.SaveSystemDNS(); err != nil {
 			log.Warn("save system dns failed (need admin?)", "err", err)
 		}
-		if err := windows.SetSystemDNS("127.0.0.1"); err != nil {
-			log.Warn("set system dns failed (need admin?)", "err", err)
-		} else {
-			log.Info("system dns set to 127.0.0.1")
-		}
 	}
 
 	var wfp *windows.LoopbackProtector
@@ -73,8 +68,28 @@ func Run(ctx context.Context, configPath string, verbose bool) error {
 		return err
 	}
 
-	// srv.Start blocks until ctx is canceled (service stop or Ctrl+C).
-	startErr := srv.Start(ctx)
+	// Listen binds the UDP/TCP ports but does not serve yet.
+	if err := srv.Listen(); err != nil {
+		cleanup(log, cfg, wfp)
+		return err
+	}
+
+	// PreWarm sends one query per upstream in parallel, warming TLS sessions
+	// while the old system DNS is still live (before we flip to 127.0.0.1).
+	srv.PreWarm(ctx)
+
+	// Flip system DNS to 127.0.0.1 AFTER bind+prewarm so there is no window
+	// without service.
+	if cfg.Windows.SetSystemDNS {
+		if err := windows.SetSystemDNS("127.0.0.1"); err != nil {
+			log.Warn("set system dns failed (need admin?)", "err", err)
+		} else {
+			log.Info("system dns set to 127.0.0.1")
+		}
+	}
+
+	// srv.Serve blocks until ctx is canceled (service stop or Ctrl+C).
+	startErr := srv.Serve(ctx)
 	if startErr != nil {
 		log.Error("dns server exited", "err", startErr)
 	}

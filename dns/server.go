@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -58,24 +59,52 @@ func NewServer(cfg *config.Config, log *internal.Logger, resolver *net.Resolver)
 	return s, nil
 }
 
-// Start binds UDP and TCP listeners and blocks until ctx is done or a fatal
-// error occurs. It returns nil on a clean shutdown.
-func (s *Server) Start(ctx context.Context) error {
+// Listen binds UDP and TCP ports and prepares the dns.Server objects without
+// starting serving. Call Serve() to begin handling queries.
+func (s *Server) Listen() error {
 	mux := dns.NewServeMux()
 	mux.Handle(".", s)
 
 	addr := s.cfg.Addr()
-	s.udp = &dns.Server{Addr: addr, Net: "udp", Handler: mux, UDPSize: 4096}
-	s.tcp = &dns.Server{Addr: addr, Net: "tcp", Handler: mux}
 
-	errCh := make(chan error, 2)
-	go func() { errCh <- s.udp.ListenAndServe() }()
-	go func() { errCh <- s.tcp.ListenAndServe() }()
+	// Bind UDP port.
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return fmt.Errorf("udp bind: %w", err)
+	}
+
+	// Bind TCP port. If it fails, close the UDP listener first.
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		pc.Close()
+		return fmt.Errorf("tcp bind: %w", err)
+	}
+
+	s.udp = &dns.Server{
+		PacketConn: pc,
+		Net:        "udp",
+		Handler:    mux,
+		UDPSize:    4096,
+	}
+	s.tcp = &dns.Server{
+		Listener: listener,
+		Net:      "tcp",
+		Handler:  mux,
+	}
 
 	s.log.Info("dns server listening", "addr", addr, "upstreams", len(s.upstreams))
 	for i, u := range s.upstreams {
 		s.log.Info("upstream", "index", i+1, "resolver", u.Raw, "proto", u.Proto)
 	}
+	return nil
+}
+
+// Serve blocks until ctx is done or a fatal error occurs. It returns nil on
+// a clean shutdown. Listen() must be called before Serve().
+func (s *Server) Serve(ctx context.Context) error {
+	errCh := make(chan error, 2)
+	go func() { errCh <- s.udp.ActivateAndServe() }()
+	go func() { errCh <- s.tcp.ActivateAndServe() }()
 
 	select {
 	case <-ctx.Done():
@@ -84,6 +113,46 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = s.Stop()
 		return err
 	}
+}
+
+// PreWarm sends one warm-up A query to each upstream in parallel, warming TLS
+// sessions and DNS caches while the system DNS is still live (before it is
+// flipped to 127.0.0.1). Non-fatal: errors are logged but not propagated.
+func (s *Server) PreWarm(ctx context.Context) {
+	prewarmCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := range s.exchangers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			q := new(dns.Msg)
+			q.SetQuestion("example.com.", dns.TypeA)
+			q.RecursionDesired = true
+
+			resp, err := s.exchangers[i].Exchange(prewarmCtx, q)
+			if err != nil {
+				s.log.Warn("prewarm failed", "resolver", s.upstreams[i].Raw, "err", err)
+				return
+			}
+			if resp == nil {
+				s.log.Warn("prewarm failed", "resolver", s.upstreams[i].Raw, "err", "nil response")
+				return
+			}
+			s.log.Info("prewarm ok", "resolver", s.upstreams[i].Raw)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// Start is a thin back-compat wrapper around Listen+Serve. Prefer calling
+// Listen()+PreWarm()+Serve() directly for fine-grained startup control.
+func (s *Server) Start(ctx context.Context) error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	return s.Serve(ctx)
 }
 
 // Stop shuts both listeners without canceling in-flight replies.

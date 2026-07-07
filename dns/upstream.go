@@ -133,7 +133,7 @@ func NewBootstrapResolver(bootstrap []string) *net.Resolver {
 	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{}
+			d := net.Dialer{Timeout: 3 * time.Second}
 			var lastErr error
 			for _, ip := range bootstrap {
 				c, err := d.DialContext(ctx, "udp", net.JoinHostPort(ip, "53"))
