@@ -71,7 +71,7 @@ func Default() *Config {
 	return &Config{
 		Upstreams: []string{},
 		Listener:  Listener{IP: "127.0.0.1", Port: 53},
-		Cache:     Cache{Size: 1024},
+		Cache:     Cache{Size: 4096}, // 4K entries ≈ ~4MB; reduces evictions on diverse domains
 		Log:       Log{Level: "info", Path: filepath.Join(DefaultDir, "zeusdns.log")},
 		Windows:   Windows{SetSystemDNS: true, WFPLoopbackProtect: true},
 	}

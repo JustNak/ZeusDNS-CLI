@@ -12,7 +12,7 @@ import (
 // Cache is a bounded LRU with per-entry TTLs. A zero-size cache is a no-op.
 type Cache struct {
 	size int
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	m    map[string]*list.Element
 	ll   *list.List
 }
@@ -36,7 +36,11 @@ func cacheKey(q *dns.Msg) (string, bool) {
 		return "", false
 	}
 	qu := q.Question[0]
-	return fmt.Sprintf("%d:%s", qu.Qtype, dns.CanonicalName(qu.Name)), true
+	key := fmt.Sprintf("%d:%d:%s", qu.Qclass, qu.Qtype, dns.CanonicalName(qu.Name))
+	if opt := q.IsEdns0(); opt != nil && opt.Do() {
+		key += ":do"
+	}
+	return key, true
 }
 
 // minTTL returns the smallest TTL among all resource records, or 0 if none.
@@ -97,8 +101,10 @@ func (c *Cache) Get(q *dns.Msg) (*dns.Msg, bool) {
 		return nil, false
 	}
 	c.ll.MoveToFront(el)
-	out := e.msg.Copy()
-	out.Id = q.Id
+	msg := e.msg
+	qid := q.Id
+	out := msg.Copy()
+	out.Id = qid
 	return out, true
 }
 

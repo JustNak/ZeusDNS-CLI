@@ -81,50 +81,60 @@ func parseDhcpJSON(b []byte) map[string]string {
 	return m
 }
 
-// getDhcpState queries the DHCP (Obtain DNS server address automatically) flag
-// for every IPv4 interface. The result is used by getSystemDNS to annotate DNS
-// entries so RestoreSystemDNS can reset to automatic DHCP DNS instead of
-// statically rewriting saved server IPs.
-func getDhcpState() (map[string]string, error) {
-	// .ToString() is REQUIRED: ConvertTo-Json serializes the .Dhcp enum
-	// (Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetIPInterface.Dhcp)
-	// as its integer value (1/0), not "Enabled"/"Disabled". Without the cast
-	// the Dhcp field unmarshals as a number, parseDhcpJSON's normalization
-	// still maps 1→"Enabled" (defensive), but emitting the string is canonical.
-	script := `Get-NetIPInterface -AddressFamily IPv4 | Select-Object InterfaceAlias,@{n='Dhcp';e={$_.Dhcp.ToString()}} | ConvertTo-Json -Compress -Depth 3`
+// getSystemDNSAndDhcp runs a single PowerShell script that fetches both DNS
+// server addresses and DHCP state for all IPv4 interfaces, returning the
+// combined result. This replaces the previous two-launch approach (one for
+// Get-DnsClientServerAddress, one for Get-NetIPInterface).
+func getSystemDNSAndDhcp() ([]ifaceDNS, error) {
+	script := `$dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object InterfaceAlias,ServerAddresses)
+try {
+  $dhcp = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop | Select-Object InterfaceAlias,@{n='Dhcp';e={$_.Dhcp.ToString()}})
+} catch {
+  $dhcp = $null
+}
+@{dns=$dns; dhcp=$dhcp} | ConvertTo-Json -Compress -Depth 5`
 	out, err := ps(script)
 	if err != nil {
-		return nil, fmt.Errorf("Get-NetIPInterface: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("getSystemDNSAndDhcp: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return parseDhcpJSON(out), nil
+
+	// Parse the combined JSON object.
+	var combined struct {
+		DNS  json.RawMessage `json:"dns"`
+		Dhcp json.RawMessage `json:"dhcp"`
+	}
+	if err := json.Unmarshal(out, &combined); err != nil {
+		return nil, fmt.Errorf("parse combined output: %w", err)
+	}
+
+	// Parse DNS entries.  @() forces an array in PS, so single-object
+	// ambiguity is eliminated, but normalizePSJSON remains defensive.
+	entries, err := normalizePSJSON([]byte(combined.DNS))
+	if err != nil {
+		return nil, fmt.Errorf("parse dns from combined: %w", err)
+	}
+
+	// Parse DHCP state.  When Get-NetIPInterface is unavailable (old
+	// systems, constrained runtimes) the catch block sets $dhcp = $null
+	// which serialises as JSON null.  Degrade gracefully — return the
+	// DNS entries without DHCP annotation (same as the historic non-fatal
+	// path).  An empty array [] is also handled (no interfaces match).
+	if combined.Dhcp != nil && string(combined.Dhcp) != "null" {
+		dhcpMap := parseDhcpJSON([]byte(combined.Dhcp))
+		for i := range entries {
+			if d, ok := dhcpMap[entries[i].InterfaceAlias]; ok {
+				entries[i].Dhcp = d
+			}
+		}
+	}
+	return entries, nil
 }
 
 // getSystemDNS reads the current IPv4 DNS server addresses per interface and
 // annotates each entry with its DHCP state so RestoreSystemDNS can distinguish
 // "automatic DHCP DNS" from "manually-set static DNS".
 func getSystemDNS() ([]ifaceDNS, error) {
-	script := `Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object InterfaceAlias,ServerAddresses | ConvertTo-Json -Compress -Depth 3`
-	out, err := ps(script)
-	if err != nil {
-		return nil, fmt.Errorf("Get-DnsClientServerAddress: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	entries, err := normalizePSJSON(out)
-	if err != nil {
-		return nil, err
-	}
-	// Annotate each entry with DHCP state so RestoreSystemDNS can distinguish
-	// "automatic DHCP DNS" from "manually-set static DNS".
-	dhcpMap, dhcpErr := getDhcpState()
-	if dhcpErr != nil {
-		// Non-fatal: old systems or constrained runtimes may lack
-		// Get-NetIPInterface; restore degrades to static rewrite instead of
-		// -ResetServerAddresses, which is safe albeit imperfect.
-		return entries, nil
-	}
-	for i := range entries {
-		entries[i].Dhcp = dhcpMap[entries[i].InterfaceAlias]
-	}
-	return entries, nil
+	return getSystemDNSAndDhcp()
 }
 
 // SaveSystemDNS records the current IPv4 DNS server addresses per interface
@@ -218,14 +228,40 @@ func SetSystemDNS(addr string) error {
 	if err != nil {
 		return fmt.Errorf("load prev dns: %w", err)
 	}
+
+	// Build a single PowerShell script that sets all interfaces at once.
+	var lines []string
 	for _, e := range entries {
 		if len(e.ServerAddresses) == 0 {
 			continue
 		}
-		script := fmt.Sprintf(`Set-DnsClientServerAddress -InterfaceAlias %s -ServerAddresses '%s'`, quoteAlias(e.InterfaceAlias), addr)
-		if out, err := ps(script); err != nil {
-			return fmt.Errorf("set dns %s: %w: %s", e.InterfaceAlias, err, strings.TrimSpace(string(out)))
+		alias := quoteAlias(e.InterfaceAlias)
+		lines = append(lines, fmt.Sprintf(
+			`try{Set-DnsClientServerAddress -InterfaceAlias %s -ServerAddresses '%s' -ErrorAction Stop}catch{$errors+=@{iface=%s;err=$_.Exception.Message}}`,
+			alias, addr, alias,
+		))
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+
+	script := "$errors=@();" + strings.Join(lines, ";") + ";ConvertTo-Json -Compress -InputObject $errors"
+	out, err := ps(script)
+	if err != nil {
+		return fmt.Errorf("set dns: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Parse error array from PS — if non-empty, report all failures.
+	var errs []struct {
+		Iface string `json:"iface"`
+		Err   string `json:"err"`
+	}
+	if err := json.Unmarshal(out, &errs); err == nil && len(errs) > 0 {
+		var msgs []string
+		for _, e := range errs {
+			msgs = append(msgs, fmt.Sprintf("%s: %s", e.Iface, e.Err))
 		}
+		return fmt.Errorf("set dns failed for: %s", strings.Join(msgs, "; "))
 	}
 	return nil
 }
@@ -240,8 +276,11 @@ func RestoreSystemDNS() error {
 		}
 		return err
 	}
+
+	// Build a single PowerShell script that restores all interfaces at once.
+	var lines []string
 	for _, e := range entries {
-		var script string
+		alias := quoteAlias(e.InterfaceAlias)
 		// DHCP-aware restore: interfaces whose IP config is DHCP ("Obtain DNS
 		// server address automatically") should use -ResetServerAddresses to
 		// return to automatic DNS, not a static rewrite.
@@ -250,18 +289,39 @@ func RestoreSystemDNS() error {
 		// (rare power-user setup) will be reset to automatic DNS. This is the
 		// correct target state for this tool — ZeusDNS is the user's chosen
 		// DNS manager and should own the DNS config.
+		var cmd string
 		switch {
-		case e.Dhcp == "Enabled":
-			script = fmt.Sprintf(`Set-DnsClientServerAddress -InterfaceAlias %s -ResetServerAddresses`, quoteAlias(e.InterfaceAlias))
-		case len(e.ServerAddresses) == 0:
-			script = fmt.Sprintf(`Set-DnsClientServerAddress -InterfaceAlias %s -ResetServerAddresses`, quoteAlias(e.InterfaceAlias))
+		case e.Dhcp == "Enabled" || len(e.ServerAddresses) == 0:
+			cmd = fmt.Sprintf(`Set-DnsClientServerAddress -InterfaceAlias %s -ResetServerAddresses`, alias)
 		default:
-			script = fmt.Sprintf(`Set-DnsClientServerAddress -InterfaceAlias %s -ServerAddresses '%s'`, quoteAlias(e.InterfaceAlias), strings.Join(e.ServerAddresses, ","))
+			servers := strings.Join(e.ServerAddresses, ",")
+			cmd = fmt.Sprintf(`Set-DnsClientServerAddress -InterfaceAlias %s -ServerAddresses '%s'`, alias, servers)
 		}
-		if out, err := ps(script); err != nil {
-			return fmt.Errorf("restore dns %s: %w: %s", e.InterfaceAlias, err, strings.TrimSpace(string(out)))
-		}
+		lines = append(lines, fmt.Sprintf(
+			`try{%s -ErrorAction Stop}catch{$errors+=@{iface=%s;err=$_.Exception.Message}}`,
+			cmd, alias,
+		))
 	}
+
+	script := "$errors=@();" + strings.Join(lines, ";") + ";ConvertTo-Json -Compress -InputObject $errors"
+	out, err := ps(script)
+	if err != nil {
+		return fmt.Errorf("restore dns: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Parse error array from PS — if non-empty, report all failures.
+	var errs []struct {
+		Iface string `json:"iface"`
+		Err   string `json:"err"`
+	}
+	if err := json.Unmarshal(out, &errs); err == nil && len(errs) > 0 {
+		var msgs []string
+		for _, e := range errs {
+			msgs = append(msgs, fmt.Sprintf("%s: %s", e.Iface, e.Err))
+		}
+		return fmt.Errorf("restore dns failed for: %s", strings.Join(msgs, "; "))
+	}
+
 	_ = os.Remove(config.PrevDNSFile)
 	return nil
 }

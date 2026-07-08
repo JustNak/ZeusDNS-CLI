@@ -1,8 +1,10 @@
 package dns
 
 import (
+	"context"
 	"crypto/tls"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -107,6 +109,53 @@ func TestCacheEviction(t *testing.T) {
 	}
 }
 
+func TestDotClientTLSResumption(t *testing.T) {
+	u, err := ParseUpstream("tls://dns.example.com:853")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := newDoTClient(u, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.tls.ClientSessionCache == nil {
+		t.Fatal("ClientSessionCache is nil, expected non-nil LRU cache")
+	}
+}
+
+func TestDotClientWarmPoolFull(t *testing.T) {
+	// Pre-fill the pool so every slot is taken.
+	pool := make(chan *dns.Conn, dotPoolSize)
+	for i := 0; i < dotPoolSize; i++ {
+		pool <- new(dns.Conn)
+	}
+
+	c := &dotClient{
+		host: "127.0.0.1",
+		port: "1", // connection refused → dial fails fast
+		tls:  &tls.Config{ServerName: "127.0.0.1"},
+		pool: pool,
+		sem:  make(chan struct{}, dotPoolSize),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := c.WarmPool(ctx)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("WarmPool on full pool: %v", err)
+	}
+	// All dials should fail instantly (connection refused), so this must
+	// complete well within our context deadline. 2s is generous for 4
+	// immediate-fail dials even on a slow machine.
+	if elapsed > 2*time.Second {
+		t.Fatalf("WarmPool took %v on full pool (expected <2s)", elapsed)
+	}
+}
+
 func TestDotClientPoolSize(t *testing.T) {
 	u, err := ParseUpstream("tls://dns.example.com:853")
 	if err != nil {
@@ -143,7 +192,7 @@ func TestDotClientPoolSize(t *testing.T) {
 	if c.tls.MinVersion != tls.VersionTLS12 {
 		t.Errorf("tls.MinVersion = %v, want %v", c.tls.MinVersion, tls.VersionTLS12)
 	}
-	if c.resolver != nil {
-		t.Errorf("resolver should be nil, got %v", c.resolver)
+	if c.hc == nil {
+		t.Errorf("hc should be non-nil (nil-in → DefaultResolver-backed), got nil")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/JustNak/ZeusDNS-CLI/internal"
 	"github.com/JustNak/ZeusDNS-CLI/service"
 	"github.com/JustNak/ZeusDNS-CLI/tui"
+	"github.com/JustNak/ZeusDNS-CLI/windows"
 )
 
 // Wizard runs the first-run setup: a huh form that collects and live-validates
@@ -54,12 +55,27 @@ func Wizard(configPath string, verbose bool) int {
 		if err := Preflight(cfg.Addr()); err != nil {
 			return err
 		}
-		exe, args, err := serviceBinPath(configPath)
+		exe, err := promoteBinary()
 		if err != nil {
 			return err
 		}
+		binPath, args, err := serviceBinPath(configPath)
+		if err != nil {
+			rollbackInstall(exe)
+			return err
+		}
 		_ = service.Uninstall() // idempotent reinstall
-		return service.Install(exe, args...)
+		if err := service.Install(binPath, args...); err != nil {
+			rollbackInstall(exe)
+			return err
+		}
+		// Add installation directory to PATH so `zeusdns` resolves from
+		// any terminal (new processes only). Non-fatal: the service works
+		// without it.
+		if err := windows.AddToMachinePath(config.InstallDir); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ add to PATH: %v\n", err)
+		}
+		return nil
 	})
 	step("starting service", func() error { return service.Start() })
 
