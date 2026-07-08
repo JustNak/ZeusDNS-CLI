@@ -133,8 +133,13 @@ func (m configureModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// modeValidating: wait for the result, ignore other input.
+	// modeValidating: wait for the result, but allow quit keys.
 	if m.mode == modeValidating {
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			m.quitting = true
+			return m, tea.Quit
+		}
 		return m, nil
 	}
 

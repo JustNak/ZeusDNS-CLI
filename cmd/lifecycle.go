@@ -66,19 +66,10 @@ func rollbackInstall(exe string) {
 // Install (re)installs and starts the service using the existing config.
 func Install(configPath string, verbose bool) int {
 	if !requireAdmin("install the ZeusDNS service") {
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	if !config.Exists(configPath) {
 		fmt.Fprintln(os.Stderr, "no config found. run `zeusdns` first to set up.")
-		return internal.ExitMisconfig
-	}
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "load config:", err)
-		return internal.ExitMisconfig
-	}
-	if err := cfg.Validate(); err != nil {
-		fmt.Fprintln(os.Stderr, "config invalid:", err)
 		return internal.ExitMisconfig
 	}
 	// If our own service is running, stop it first so it releases port 53.
@@ -87,32 +78,10 @@ func Install(configPath string, verbose bool) int {
 	}
 	_ = service.Uninstall() // idempotent: clear any leftover registration
 
-	// Pre-flight: port 53 must be free. If ctrld / AdGuard Home / the Windows
-	// DNS cache still holds it, bail out with a clear message instead of
-	// installing a service that will crash-loop on bind.
-	if err := Preflight(cfg.Addr()); err != nil {
-		fmt.Fprintln(os.Stderr, "pre-flight check failed:", err)
-		return internal.ExitMisconfig
-	}
-
-	// Promote the running binary to the canonical install location so the
-	// registered service binPath stays stable (and self-update swaps the right
-	// file) regardless of where the user ran `zeusdns install` from.
-	exe, err := promoteBinary()
+	exe, err := installService(configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "install binary:", err)
-		return internal.ExitMisconfig
-	}
-	binPath, args, err := serviceBinPath(configPath)
-	if err != nil {
-		rollbackInstall(exe)
-		fmt.Fprintln(os.Stderr, "resolve bin path:", err)
-		return internal.ExitMisconfig
-	}
-	if err := service.Install(binPath, args...); err != nil {
-		rollbackInstall(exe)
-		fmt.Fprintln(os.Stderr, "install:", err)
-		return internal.ExitMisconfig
+		fmt.Fprintln(os.Stderr, err)
+		return internal.ExitService
 	}
 	fmt.Println(tui.OKStyle.Render("service installed"))
 	// Put the install dir on the machine PATH so `zeusdns` resolves from any
@@ -127,7 +96,7 @@ func Install(configPath string, verbose bool) int {
 	if err := service.Start(); err != nil {
 		rollbackInstall(exe)
 		fmt.Fprintln(os.Stderr, "start:", err)
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	fmt.Println(tui.OKStyle.Render("service started"))
 	fmt.Println("open a new terminal to use `zeusdns` from anywhere.")
@@ -138,13 +107,13 @@ func Install(configPath string, verbose bool) int {
 // deletes the promoted binary + install dir, and drops the PATH entry.
 func Uninstall(configPath string, verbose bool) int {
 	if !requireAdmin("uninstall the ZeusDNS service") {
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	_ = service.Stop()
 	_ = windows.RestoreSystemDNS() // belt-and-suspenders if the stop handler missed it
 	if err := service.Uninstall(); err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	// Remove the promoted binary. The install dir is removed best-effort — a
 	// lingering .old file (pending reboot-delete from a prior self-update) or
@@ -164,7 +133,7 @@ func Uninstall(configPath string, verbose bool) int {
 func Start() int {
 	if err := service.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	fmt.Println(tui.OKStyle.Render("service started"))
 	return internal.ExitSuccess
@@ -174,7 +143,7 @@ func Start() int {
 func Stop() int {
 	if err := service.Stop(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop:", err)
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	fmt.Println(tui.OKStyle.Render("service stopped (system DNS restored)"))
 	return internal.ExitSuccess
@@ -184,7 +153,7 @@ func Stop() int {
 func Restart() int {
 	if err := service.Restart(); err != nil {
 		fmt.Fprintln(os.Stderr, "restart:", err)
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	fmt.Println(tui.OKStyle.Render("service restarted"))
 	return internal.ExitSuccess
@@ -197,14 +166,14 @@ func Restart() int {
 // refuses if no installed binary exists (run `zeusdns install` first).
 func Update(version string, verbose bool) int {
 	if !requireAdmin("update ZeusDNS") {
-		return internal.ExitMisconfig
+		return internal.ExitService
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	msg, err := updater.Update(ctx, version)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "update:", err)
-		return internal.ExitMisconfig
+		return internal.ExitFailure
 	}
 	fmt.Println(tui.OKStyle.Render(msg))
 	return internal.ExitSuccess

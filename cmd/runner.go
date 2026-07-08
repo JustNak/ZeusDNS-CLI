@@ -47,8 +47,19 @@ func Run(ctx context.Context, configPath string, verbose bool) error {
 	if cfg.Windows.SetSystemDNS {
 		bootstrap = windows.GetBootstrapDNS()
 		log.Info("bootstrap resolver", "servers", bootstrap)
-		if err := windows.SaveSystemDNS(); err != nil {
-			log.Warn("save system dns failed (need admin?)", "err", err)
+
+		// Crash-resume guard: if prev_dns.json already exists (dangling
+		// from a prior crash where RestoreSystemDNS never ran), the system
+		// DNS is already 127.0.0.1. Don't overwrite the backup — preserve
+		// the original DNS so a future RestoreSystemDNS can still recover.
+		// On a clean shutdown RestoreSystemDNS deletes prev_dns.json, so
+		// a fresh start always saves normally.
+		if _, err := os.Stat(config.PrevDNSFile); err == nil {
+			log.Info("prev_dns.json exists — crash-resume; preserving prior DNS backup")
+		} else {
+			if err := windows.SaveSystemDNS(); err != nil {
+				log.Warn("save system dns failed (need admin?)", "err", err)
+			}
 		}
 	}
 
@@ -126,7 +137,7 @@ func RunForeground(configPath string, verbose bool) int {
 	defer cancel()
 	if err := Run(ctx, configPath, verbose); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		return internal.ExitMisconfig
+		return internal.ExitFailure
 	}
 	return internal.ExitSuccess
 }

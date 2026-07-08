@@ -25,7 +25,7 @@ func Wizard(configPath string, verbose bool) int {
 	res, err := tui.RunWizard()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "setup cancelled:", err)
-		return internal.ExitMisconfig
+		return internal.ExitCancelled
 	}
 	if !res.Install {
 		fmt.Println("Not installing. Run `zeusdns` again whenever you're ready.")
@@ -39,7 +39,9 @@ func Wizard(configPath string, verbose bool) int {
 	}
 
 	fmt.Println("\nConfiguring...")
-	step("writing config", func() error { return cfg.Save(configPath) })
+	if err := step("writing config", func() error { return cfg.Save(configPath) }); err != nil {
+		return internal.ExitMisconfig
+	}
 
 	// Installing/starting the service needs admin. If we're not elevated,
 	// stop here with a clear message — the config is saved, so re-running
@@ -51,22 +53,9 @@ func Wizard(configPath string, verbose bool) int {
 		return internal.ExitSuccess
 	}
 
-	step("installing service", func() error {
-		if err := Preflight(cfg.Addr()); err != nil {
-			return err
-		}
-		exe, err := promoteBinary()
+	if err := step("installing service", func() error {
+		_, err := installService(configPath)
 		if err != nil {
-			return err
-		}
-		binPath, args, err := serviceBinPath(configPath)
-		if err != nil {
-			rollbackInstall(exe)
-			return err
-		}
-		_ = service.Uninstall() // idempotent reinstall
-		if err := service.Install(binPath, args...); err != nil {
-			rollbackInstall(exe)
 			return err
 		}
 		// Add installation directory to PATH so `zeusdns` resolves from
@@ -76,19 +65,24 @@ func Wizard(configPath string, verbose bool) int {
 			fmt.Fprintf(os.Stderr, "  ⚠ add to PATH: %v\n", err)
 		}
 		return nil
-	})
-	step("starting service", func() error { return service.Start() })
+	}); err != nil {
+		return internal.ExitService
+	}
+	if err := step("starting service", func() error { return service.Start() }); err != nil {
+		return internal.ExitService
+	}
 
 	fmt.Println("\n" + tui.OKStyle.Render("Done!!!"))
 	Pause()
 	return internal.ExitSuccess
 }
 
-// step prints a labelled check/cross line and returns whether it succeeded.
-func step(label string, fn func() error) {
+// step prints a labelled check/cross line and returns the first error.
+func step(label string, fn func() error) error {
 	if err := fn(); err != nil {
 		fmt.Printf("  %s %s  (%v)\n", tui.ErrStyle.Render("✗"), label, err)
-	} else {
-		fmt.Printf("  %s %s\n", tui.OKStyle.Render("✓"), label)
+		return err
 	}
+	fmt.Printf("  %s %s\n", tui.OKStyle.Render("✓"), label)
+	return nil
 }

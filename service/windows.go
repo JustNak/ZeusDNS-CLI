@@ -30,7 +30,9 @@ func IsWindowsService() bool {
 
 func connect() (*mgr.Mgr, error) { return mgr.Connect() }
 
-// Install creates the service pointing at exePath with automatic start.
+// Install creates the service pointing at exePath with automatic start,
+// then configures SCM recovery actions so the service restarts automatically
+// after a crash (the SCM restart acts as the watchdog).
 // Extra args (e.g. "-c", configPath) are appended to the service binPath;
 // CreateService escapes each one correctly. Pass JUST the exe path as
 // exePath, not a pre-quoted command line.
@@ -52,6 +54,20 @@ func Install(exePath string, args ...string) error {
 		return fmt.Errorf("create service: %w", err)
 	}
 	defer s.Close()
+
+	// Configure SCM recovery: restart the service on 1st, 2nd, and any
+	// subsequent failure. The reset-period means the failure count is
+	// reset to zero after 60s of steady operation, so a one-time glitch
+	// won't keep the service in a permanent restart loop.
+	recoveryActions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 0},
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 15 * time.Second},
+	}
+	const resetPeriodSecs = 60
+	if err := s.SetRecoveryActions(recoveryActions, resetPeriodSecs); err != nil {
+		return fmt.Errorf("set recovery actions: %w", err)
+	}
 	return nil
 }
 
