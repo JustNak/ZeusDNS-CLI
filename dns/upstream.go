@@ -147,6 +147,35 @@ func NewBootstrapResolver(bootstrap []string) *net.Resolver {
 	}
 }
 
+// Validate checks that the upstream address is not a loopback, link-local,
+// multicast, or unspecified address, and that it does not equal the local
+// listener address (self-referential loop). Hostnames are not IP-checked
+// (they resolve at runtime via the bootstrap resolver) but are still checked
+// for self-reference.
+func (u *Upstream) Validate(listenerAddr string) error {
+	host, _, err := net.SplitHostPort(u.Server)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		switch {
+		case ip.IsLoopback():
+			return fmt.Errorf("loopback address %q not allowed", host)
+		case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+			return fmt.Errorf("link-local address %q not allowed", host)
+		case ip.IsMulticast():
+			return fmt.Errorf("multicast address %q not allowed", host)
+		case ip.IsUnspecified():
+			return fmt.Errorf("unspecified address %q not allowed", host)
+		}
+	}
+	if u.Server == listenerAddr {
+		return fmt.Errorf("self-referential address (listener %q) not allowed", listenerAddr)
+	}
+	return nil
+}
+
 // Display is a short human label for menus and logs.
 func (u *Upstream) Display() string { return fmt.Sprintf("%s   (%s)", u.Raw, u.Proto) }
 

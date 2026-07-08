@@ -105,13 +105,12 @@ func NewLogger(level, path string, console bool) (*Logger, error) {
 	return &Logger{Logger: slog.New(h), mu: mu, file: file, bufw: bufw}, nil
 }
 
-// flush writes any buffered log data to the underlying file.
-func (l *Logger) flush() error {
+// flushLocked writes any buffered log data to the underlying file.
+// The caller MUST hold l.mu.
+func (l *Logger) flushLocked() error {
 	if l == nil || l.bufw == nil {
 		return nil
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	return l.bufw.Flush()
 }
 
@@ -122,7 +121,7 @@ func (l *Logger) Close() {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_ = l.flush()
+	_ = l.flushLocked()
 	_ = l.file.Close()
 	l.file = nil
 	l.bufw = nil

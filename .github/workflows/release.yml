@@ -56,12 +56,33 @@ jobs:
           go build -trimpath -ldflags "-s -w -X github.com/JustNak/ZeusDNS-CLI/cmd.Version=${{ steps.ver.outputs.version }}" -o zeusdns.exe .
           zip -j zeusdns_${{ steps.ver.outputs.version }}_windows_arm64.zip zeusdns.exe
 
+      # Minisign signing: signs each release zip with the owner's private key
+      # (stored as a GitHub Encrypted Secret MINISIGN_PRIVATE_KEY). The .minisig
+      # files are uploaded alongside the zips and verified at update time
+      # against the embedded public key in updater/minisign.go.
+      # This step is skipped if the secret is not set (e.g. PRs from forks),
+      # but the updater will refuse to install unsigned binaries unless the
+      # embedded pubkey is configured. See updater/KEYGEN.md.
+      - name: Sign artifacts with minisign
+        if: ${{ secrets.MINISIGN_PRIVATE_KEY != '' }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          printf '%s' "${{ secrets.MINISIGN_PRIVATE_KEY }}" > /tmp/minisign.key
+          minisign -S -m zeusdns_${{ steps.ver.outputs.version }}_windows_amd64.zip -s /tmp/minisign.key
+          minisign -S -m zeusdns_${{ steps.ver.outputs.version }}_windows_arm64.zip -s /tmp/minisign.key
+          rm -f /tmp/minisign.key
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            zeusdns_${{ steps.ver.outputs.version }}_windows_amd64.zip \
-            zeusdns_${{ steps.ver.outputs.version }}_windows_arm64.zip \
+          # Build the file list conditionally to include .minisig files
+          # when signing was performed and the files exist.
+          base="zeusdns_${{ steps.ver.outputs.version }}_windows"
+          files=("${base}_amd64.zip" "${base}_arm64.zip")
+          for sig in "${base}_amd64.zip.minisig" "${base}_arm64.zip.minisig"; do
+            [ -f "$sig" ] && files+=("$sig")
+          done
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes

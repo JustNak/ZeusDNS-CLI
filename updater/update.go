@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 
+	"golang.org/x/mod/semver"
 	win "golang.org/x/sys/windows"
 
 	"github.com/JustNak/ZeusDNS-CLI/config"
@@ -29,6 +30,40 @@ import (
 // Repo is the GitHub "owner/repo" to pull releases from. Change this if you
 // publish under a different path.
 const Repo = "JustNak/ZeusDNS-CLI"
+
+const (
+	// maxDownloadSize caps the amount of data the updater will accept for a
+	// single release-zip download (64 MiB). The actual binary is ~10-20 MiB.
+	maxDownloadSize = 64 << 20
+
+	// maxExtractSize caps each zip entry extracted from the archive.
+	maxExtractSize = 64 << 20
+)
+
+// allowedDownloadHosts restricts HTTP(S) redirect targets for the updater
+// client. Only GitHub and its content CDN are permitted.
+var allowedDownloadHosts = []string{
+	"github.com",
+	"api.github.com",
+	"objects.githubusercontent.com",
+}
+
+// restrictedHTTPClient is the updater's HTTP client with a redirect-target
+// allowlist and a maximum-redirect guard. Used for all outbound calls.
+var restrictedHTTPClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		host := req.URL.Hostname()
+		for _, a := range allowedDownloadHosts {
+			if strings.EqualFold(host, a) {
+				return nil
+			}
+		}
+		return fmt.Errorf("redirect to disallowed host: %s", host)
+	},
+}
 
 type ghRelease struct {
 	TagName string    `json:"tag_name"`
@@ -49,7 +84,7 @@ func fetchLatestRelease(ctx context.Context) (*ghRelease, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := restrictedHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -73,49 +108,6 @@ func LatestVersion(ctx context.Context) (string, error) {
 	return strings.TrimPrefix(r.TagName, "v"), nil
 }
 
-// parseSemver parses a "X.Y.Z" version string into 3 ints (missing segments
-// treated as 0). It returns nil if any segment is non-numeric, in which case
-// the caller should treat the version as non-semver (e.g. "dev") and skip
-// semver comparison entirely rather than guessing via string compare (which
-// would rank "dev" > "1.2.3" byte-wise and mis-block dev=>release updates).
-func parseSemver(s string) []int {
-	parts := strings.Split(s, ".")
-	nums := make([]int, 0, 3)
-	for _, p := range parts {
-		var n int
-		if _, err := fmt.Sscanf(p, "%d", &n); err != nil {
-			return nil // non-numeric segment
-		}
-		nums = append(nums, n)
-	}
-	for len(nums) < 3 {
-		nums = append(nums, 0)
-	}
-	return nums
-}
-
-// isSemver reports whether s is a pure-numeric "X.Y[.Z]" version.
-func isSemver(s string) bool { return parseSemver(s) != nil }
-
-// compareVersion compares two SEMVER strings ("X.Y.Z", tolerating missing
-// segments as 0). Returns -1 if a < b, 0 if equal, 1 if a > b.
-// Callers must gate on isSemver for both args first: non-semver versions
-// ("dev", pre-release tags) have no meaningful ordering and must be skipped,
-// not string-compared.
-func compareVersion(a, b string) int {
-	an := parseSemver(a)
-	bn := parseSemver(b)
-	for i := 0; i < 3; i++ {
-		if an[i] < bn[i] {
-			return -1
-		}
-		if an[i] > bn[i] {
-			return 1
-		}
-	}
-	return 0
-}
-
 // Update checks for a newer release than currentVersion and, if found, downloads
 // and swaps the INSTALLED binary at config.InstallPath (never the running exe,
 // so it behaves the same whether launched from the install path or a dev
@@ -134,7 +126,8 @@ func Update(ctx context.Context, currentVersion string) (string, error) {
 	// Downgrade guard: only when BOTH versions are real semver. Non-semver
 	// current ("dev" builds) bypasses the guard so a dev build may update to
 	// any real release; the equality case above already short-circuits same-version.
-	if isSemver(currentVersion) && isSemver(latest) && compareVersion(currentVersion, latest) > 0 {
+	cv, lv := "v"+currentVersion, "v"+latest
+	if semver.IsValid(cv) && semver.IsValid(lv) && semver.Compare(cv, lv) > 0 {
 		return "", fmt.Errorf("refusing downgrade: installed %s is newer than latest %s", currentVersion, latest)
 	}
 
@@ -148,6 +141,22 @@ func Update(ctx context.Context, currentVersion string) (string, error) {
 		return "", err
 	}
 	defer os.Remove(zipPath)
+
+	// Minisign verification: download the .minisig file and verify the zip
+	// against the embedded public key. This is the primary trust anchor.
+	// Fail-closed when the pubkey is not configured.
+	sigData, err := downloadMinisig(ctx, rel, assetName)
+	if err != nil {
+		return "", fmt.Errorf("minisign signature download failed: %w", err)
+	}
+	zipData, err := os.ReadFile(zipPath)
+	if err != nil {
+		return "", fmt.Errorf("read downloaded zip: %w", err)
+	}
+	if err := minisigVerify(zipData, sigData); err != nil {
+		return "", fmt.Errorf("minisign verification failed: %w", err)
+	}
+	zipData = nil // allow GC
 
 	newExe, err := extractExe(zipPath)
 	if err != nil {
@@ -219,7 +228,7 @@ func downloadToTemp(ctx context.Context, url, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := restrictedHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -227,16 +236,60 @@ func downloadToTemp(ctx context.Context, url, name string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download returned %d", resp.StatusCode)
 	}
+	// Cap downloads so a malicious release cannot exhaust disk or memory.
+	limited := io.LimitReader(resp.Body, maxDownloadSize+1)
 	tmp, err := os.CreateTemp("", "zeusdns-update-*.zip")
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	written, err := io.Copy(tmp, limited)
+	if err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return "", err
 	}
+	if written > maxDownloadSize {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("download too large: exceeded %d bytes", maxDownloadSize)
+	}
 	return tmp.Name(), tmp.Close()
+}
+
+// downloadMinisig finds the .minisig signature file for the given release
+// asset in the release metadata and downloads its content.
+func downloadMinisig(ctx context.Context, r *ghRelease, assetName string) ([]byte, error) {
+	sigName := assetName + minisigFileSuffix
+	var sigURL string
+	for _, a := range r.Assets {
+		if a.Name == sigName {
+			sigURL = a.BrowserDownloadURL
+			break
+		}
+	}
+	if sigURL == "" {
+		return nil, fmt.Errorf("no minisign signature file (%s) in release assets", sigName)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sigURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := restrictedHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download minisig returned %d", resp.StatusCode)
+	}
+
+	// Minisig files are tiny (<1 KB) but use a small limit as a sanity check.
+	sigData, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return nil, err
+	}
+	return sigData, nil
 }
 
 // extractExe finds zeusdns.exe inside the zip and writes it to a temp file.
@@ -247,17 +300,11 @@ func extractExe(zipPath string) (string, error) {
 	}
 	defer zr.Close()
 	for _, f := range zr.File {
-		if strings.EqualFold(filepath.Base(f.Name), config.BinaryName) {
+		if f.Name == config.BinaryName {
 			return copyZipEntry(f)
 		}
 	}
-	// fall back to any .exe in the archive
-	for _, f := range zr.File {
-		if strings.EqualFold(filepath.Ext(f.Name), ".exe") {
-			return copyZipEntry(f)
-		}
-	}
-	return "", fmt.Errorf("no %s found in archive", config.BinaryName)
+	return "", fmt.Errorf("no %s found in archive (exact entry name required)", config.BinaryName)
 }
 
 func copyZipEntry(f *zip.File) (string, error) {
@@ -266,14 +313,27 @@ func copyZipEntry(f *zip.File) (string, error) {
 		return "", err
 	}
 	defer rc.Close()
+
+	// Reject entries larger than the cap before streaming.
+	if f.UncompressedSize64 > maxExtractSize {
+		return "", fmt.Errorf("zip entry %s too large: %d bytes (max %d)", f.Name, f.UncompressedSize64, maxExtractSize)
+	}
+
+	limited := io.LimitReader(rc, maxExtractSize+1)
 	tmp, err := os.CreateTemp("", "zeusdns-new-*.exe")
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(tmp, rc); err != nil {
+	written, err := io.Copy(tmp, limited)
+	if err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return "", err
+	}
+	if written > maxExtractSize {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("zip entry %s extract exceeded %d bytes", f.Name, maxExtractSize)
 	}
 	return tmp.Name(), tmp.Close()
 }
@@ -325,7 +385,7 @@ func verifyCandidate(ctx context.Context, r *ghRelease, assetName, candidatePath
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := restrictedHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}

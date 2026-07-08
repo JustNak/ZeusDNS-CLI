@@ -153,7 +153,8 @@ func (c *Config) Save(path string) error {
 	return nil
 }
 
-// Validate checks the config is usable: at least one upstream and a valid port.
+// Validate checks the config is usable: at least one upstream, a valid port
+// and listener IP, and a valid log path.
 func (c *Config) Validate() error {
 	if len(c.Upstreams) == 0 {
 		return fmt.Errorf("no upstreams configured")
@@ -167,8 +168,37 @@ func (c *Config) Validate() error {
 	for _, raw := range c.Upstreams {
 		s := strings.ToLower(strings.TrimSpace(raw))
 		if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "tls://") && !strings.HasPrefix(s, "dot://") {
-			return fmt.Errorf("upstream %q: must be https:// (DoH) or tls:///dot:// (DoT)", raw)
+			return fmt.Errorf("upstream %s: must be https:// (DoH) or tls:///dot:// (DoT)", RedactURL(raw))
 		}
+	}
+	if err := c.ValidateLogPath(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateLogPath checks that Log.Path, when resolved, stays under DefaultDir.
+// If Log.Path is empty, the default (DefaultDir + "zeusdns.log") is used and
+// is always valid. A path outside the protected config directory is rejected
+// because the log file inherits the restrictive DACL applied to DefaultDir,
+// and a path outside would bypass that protection.
+func (c *Config) ValidateLogPath() error {
+	p := c.Log.Path
+	if p == "" {
+		return nil // defaults to DefaultDir, which is always valid
+	}
+	// Resolve to absolute, cleaning any ".." components.
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return fmt.Errorf("log path: resolve %q: %w", p, err)
+	}
+	// Require log path to be under DefaultDir.
+	def := filepath.Clean(DefaultDir) + string(filepath.Separator)
+	if !strings.HasPrefix(abs+"\\", def) && !strings.HasPrefix(abs+"/", def) {
+		return fmt.Errorf(
+			"log path %q resolves outside the protected config directory %q; "+
+				"use a path under %s so the log file inherits the restrictive DACL",
+			p, DefaultDir, DefaultDir)
 	}
 	return nil
 }
@@ -211,6 +241,39 @@ func applyEnv(c *Config) error {
 		c.Windows.WFPLoopbackProtect = parseBool(v)
 	}
 	return nil
+}
+
+// RedactURL masks the path component of a DoH upstream URL for safe display
+// in error messages and logs. DoT URLs (tls:// or dot://) have no path
+// component and are returned verbatim. The redacted token stays in the stored
+// config (the ACL protects it); only display paths are masked.
+//
+// Examples:
+//
+//	https://dns.controld.com/abc123  →  https://dns.controld.com/***
+//	tls://dns.example.com:853        →  tls://dns.example.com:853
+func RedactURL(raw string) string {
+	// Only redact https:// URLs (DoH may have tokens in the path).
+	if len(raw) < 8 || raw[:8] != "https://" {
+		return raw
+	}
+	// Find the third '/' (after https://).
+	slash := 0
+	count := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '/' {
+			count++
+			if count == 3 {
+				slash = i
+				break
+			}
+		}
+	}
+	if slash == 0 || slash == len(raw)-1 {
+		// No path or empty path — nothing to redact.
+		return raw
+	}
+	return raw[:slash+1] + "***"
 }
 
 func splitCSV(s string) []string {

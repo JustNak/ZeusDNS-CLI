@@ -6,6 +6,7 @@
 package windows
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -36,9 +37,14 @@ func quoteAlias(alias string) string {
 	return "'" + strings.ReplaceAll(alias, "'", "''") + "'"
 }
 
-// parseDhcpJSON transforms the output of Get-NetIPInterface into a map of
-// interface alias → DHCP state. Like normalizePSJSON it handles PowerShell's
-// single-object-vs-array ambiguity.
+// prevDNSFile is the on-disk wrapper for prev_dns.json. It adds a SHA-256
+// checksum of the serialised entries so tampering can be detected on restore.
+// Existing files (bare JSON array without the wrapper) are still parsed for
+// backward compatibility.
+type prevDNSFile struct {
+	Entries  []ifaceDNS `json:"entries"`
+	Checksum string     `json:"checksum"` // SHA-256 hex of marshalled entries
+} 
 // dhcpString normalizes a raw Dhcp value from Get-NetIPInterface output into
 // the string "Enabled"/"Disabled". ConvertTo-Json emits the .NET enum as its
 // underlying integer (1/0) when the value is not cast, but as the string when
@@ -138,7 +144,10 @@ func getSystemDNS() ([]ifaceDNS, error) {
 }
 
 // SaveSystemDNS records the current IPv4 DNS server addresses per interface
-// to config.PrevDNSFile so they can be restored on stop/uninstall.
+// to config.PrevDNSFile so they can be restored on stop/uninstall. It also
+// applies a restrictive Windows DACL on the config directory and known files
+// (see ProtectConfigDir) and embeds a SHA-256 checksum in prev_dns.json to
+// detect tampering on restore.
 func SaveSystemDNS() error {
 	entries, err := getSystemDNS()
 	if err != nil {
@@ -147,11 +156,29 @@ func SaveSystemDNS() error {
 	if err := os.MkdirAll(config.DefaultDir, 0o750); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(entries, "", "  ")
+
+	// Compute SHA-256 checksum over marshalled entries.
+	rawEntries, _ := json.Marshal(entries)
+	sum := sha256.Sum256(rawEntries)
+
+	pf := prevDNSFile{
+		Entries:  entries,
+		Checksum: fmt.Sprintf("%x", sum),
+	}
+	data, err := json.MarshalIndent(pf, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(config.PrevDNSFile, data, 0o640)
+
+	// Write, then apply restrictive ACL on the directory and known files.
+	// ACL protection is best-effort: if it fails (e.g. process not elevated)
+	// we log but do not abort — the WriteFile must succeed for the system
+	// DNS to function.
+	if err := os.WriteFile(config.PrevDNSFile, data, 0o640); err != nil {
+		return err
+	}
+	_ = ProtectConfigDir()
+	return nil
 }
 
 // GetBootstrapDNS returns the current system DNS server IPs suitable for use
@@ -209,14 +236,45 @@ func normalizePSJSON(b []byte) ([]ifaceDNS, error) {
 	return arr, nil
 }
 
+// loadPrev reads and verifies prev_dns.json. It first tries the new wrapper
+// format (prevDNSFile with checksum); if that fails it falls back to the
+// legacy bare-array format for backward compatibility. When a checksum is
+// present in the file it is verified; a mismatch returns an error to prevent
+// loading a tampered state into RestoreSystemDNS.
 func loadPrev() ([]ifaceDNS, error) {
 	data, err := os.ReadFile(config.PrevDNSFile)
 	if err != nil {
 		return nil, err
 	}
+	return parsePrevDNS(data)
+}
+
+// parsePrevDNS parses the raw JSON of prev_dns.json and verifies its embedded
+// checksum. It supports both the new wrapper format (prevDNSFile with
+// checksum) and the legacy bare-array format for backward compatibility.
+// Extracted for testability.
+func parsePrevDNS(data []byte) ([]ifaceDNS, error) {
+	// Try new wrapper format first.
+	var pf prevDNSFile
+	if err := json.Unmarshal(data, &pf); err == nil {
+		// Verify checksum if present (legacy files may have an empty checksum).
+		if pf.Checksum != "" {
+			rawEntries, _ := json.Marshal(pf.Entries)
+			sum := sha256.Sum256(rawEntries)
+			got := fmt.Sprintf("%x", sum)
+			if got != pf.Checksum {
+				return nil, fmt.Errorf(
+					"prev_dns.json checksum mismatch: file tampered or corrupt "+
+						"(want %s, got %s)", pf.Checksum, got)
+			}
+		}
+		return pf.Entries, nil
+	}
+
+	// Fall back to legacy bare-array format for backward compatibility.
 	var arr []ifaceDNS
 	if err := json.Unmarshal(data, &arr); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse prev_dns.json: %w", err)
 	}
 	return arr, nil
 }

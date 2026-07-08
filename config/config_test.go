@@ -102,3 +102,73 @@ func TestMissingFileIsNotError(t *testing.T) {
 		t.Fatalf("missing file should yield zero upstreams, got %v", c.Upstreams)
 	}
 }
+
+func TestRedactURL_DoH(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"https://dns.controld.com/abc123def456", "https://dns.controld.com/***"},
+		{"https://dns.example.com/dns-query", "https://dns.example.com/***"},
+		{"https://dns.example.com/", "https://dns.example.com/"}, // empty path, no token
+		{"https://dns.example.com", "https://dns.example.com"},               // no path at all
+		{"tls://dns.example.com:853", "tls://dns.example.com:853"},           // DoT unchanged
+		{"dot://dns.example.com", "dot://dns.example.com"},                   // DoT unchanged
+		{"https://dns.example.com/path/with/many/parts", "https://dns.example.com/***"},
+	}
+	for _, c := range cases {
+		got := RedactURL(c.in)
+		if got != c.want {
+			t.Errorf("RedactURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestValidateLogPath_EmptyIsOK(t *testing.T) {
+	c := Default()
+	if err := c.ValidateLogPath(); err != nil {
+		t.Fatalf("empty log path should be valid: %v", err)
+	}
+}
+
+func TestValidateLogPath_InsideDefaultDir(t *testing.T) {
+	t.Run("direct path", func(t *testing.T) {
+		c := Default()
+		c.Log.Path = DefaultDir + "\\my.log"
+		if err := c.ValidateLogPath(); err != nil {
+			t.Fatalf("path inside DefaultDir should be valid: %v", err)
+		}
+	})
+	t.Run("nested dir", func(t *testing.T) {
+		c := Default()
+		c.Log.Path = DefaultDir + "\\subdir\\zeusdns.log"
+		if err := c.ValidateLogPath(); err != nil {
+			t.Fatalf("nested path inside DefaultDir should be valid: %v", err)
+		}
+	})
+}
+
+func TestValidateLogPath_OutsideDefaultDir(t *testing.T) {
+	t.Run("root temp", func(t *testing.T) {
+		c := Default()
+		c.Log.Path = `C:\Windows\Temp\zeusdns.log`
+		if err := c.ValidateLogPath(); err == nil {
+			t.Fatal("path outside DefaultDir should be rejected")
+		}
+	})
+	t.Run("different drive", func(t *testing.T) {
+		c := Default()
+		c.Log.Path = `D:\logs\zeusdns.log`
+		if err := c.ValidateLogPath(); err == nil {
+			t.Fatal("path on different drive should be rejected")
+		}
+	})
+}
+
+func TestValidateLogPath_ParentTraversal(t *testing.T) {
+	c := Default()
+	c.Log.Path = DefaultDir + `\..\..\Windows\Temp\zeusdns.log`
+	// This resolves to a path outside DefaultDir and should be rejected.
+	if err := c.ValidateLogPath(); err == nil {
+		t.Fatal("parent-traversal path that ends up outside DefaultDir should be rejected")
+	}
+}
