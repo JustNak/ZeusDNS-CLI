@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -17,6 +19,11 @@ import (
 const dotPoolSize = 8
 
 const dotPerQueryTimeout = 5 * time.Second
+
+// dotPerAttemptTimeout caps how long a single attempt within the Exchange
+// retry loop may wait. This prevents attempt-2 from being born-dead when
+// attempt-1 consumes most of the per-query budget.
+const dotPerAttemptTimeout = 3 * time.Second
 
 // dotClient is a DoT (RFC 7858) client that maintains a small pool of warm
 // TLS connections per upstream. Each Exchange acquires a connection from the
@@ -31,6 +38,9 @@ type dotClient struct {
 	hc   *hostnameCache // upstream IP cache (nil-in → DefaultResolver-backed)
 	pool chan *dns.Conn
 	sem  chan struct{}
+
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 func newDoTClient(u *Upstream, r *net.Resolver) (*dotClient, error) {
@@ -78,6 +88,9 @@ func (c *dotClient) dial(ctx context.Context) (*dns.Conn, error) {
 // getConn returns a reusable connection from the pool, or dials a fresh one
 // when the pool is empty.
 func (c *dotClient) getConn(ctx context.Context) (*dns.Conn, error) {
+	if c.closed.Load() {
+		return nil, fmt.Errorf("DoT client closed")
+	}
 	select {
 	case conn := <-c.pool:
 		return conn, nil
@@ -89,6 +102,10 @@ func (c *dotClient) getConn(ctx context.Context) (*dns.Conn, error) {
 // putConn returns a healthy connection to the pool for reuse. If the pool is
 // full the connection is closed instead.
 func (c *dotClient) putConn(conn *dns.Conn) {
+	if c.closed.Load() {
+		_ = conn.Close()
+		return
+	}
 	select {
 	case c.pool <- conn:
 	default:
@@ -113,6 +130,24 @@ func (c *dotClient) WarmPool(ctx context.Context) error {
 	return nil
 }
 
+// Close drains the connection pool and closes every cached TLS connection.
+// It is idempotent (sync.Once) and safe to call concurrently with Exchange.
+// After Close returns, all Exchange calls return an error.
+func (c *dotClient) Close() error {
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		for {
+			select {
+			case conn := <-c.pool:
+				_ = conn.Close()
+			default:
+				return
+			}
+		}
+	})
+	return nil
+}
+
 // exchangeOnConn performs a single write+read cycle on an owned connection.
 // The caller must Close the conn on error and putConn on success.
 func (c *dotClient) exchangeOnConn(deadline time.Time, conn *dns.Conn, msg *dns.Msg) (*dns.Msg, error) {
@@ -129,12 +164,19 @@ func (c *dotClient) exchangeOnConn(deadline time.Time, conn *dns.Conn, msg *dns.
 // call acquires its own connection from the pool (or dials fresh), performs a
 // synchronous I/O cycle, and returns the healthy connection to the pool. On
 // I/O error the connection is closed and one automatic retry is made with a
-// fresh conn (both attempts share the single per-query deadline computed
-// above, so a retry cannot extend the timeout window).
+// fresh conn. Each attempt gets its own per-attempt deadline so a slow
+// attempt-1 does not leave attempt-2 born-dead, and the combined budget
+// never exceeds the original per-query deadline.
 func (c *dotClient) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	deadline := time.Now().Add(dotPerQueryTimeout)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
+	if c.closed.Load() {
+		return nil, fmt.Errorf("DoT client closed")
+	}
+
+	// Outer deadline: the absolute latest time for the full Exchange
+	// (both attempts together, regardless of per-attempt caps).
+	outerDeadline := time.Now().Add(dotPerQueryTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(outerDeadline) {
+		outerDeadline = dl
 	}
 
 	// Acquire concurrency slot, ctx-cancellable.
@@ -149,6 +191,14 @@ func (c *dotClient) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+
+		// Per-attempt deadline: use whatever remains of the outer deadline,
+		// but never more than dotPerAttemptTimeout from now, so a slow
+		// attempt-1 does not leave attempt-2 born-dead.
+		deadline := outerDeadline
+		if pa := time.Now().Add(dotPerAttemptTimeout); pa.Before(deadline) {
+			deadline = pa
 		}
 
 		conn, derr := c.getConn(ctx)

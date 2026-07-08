@@ -60,10 +60,17 @@ func (h *hostnameCache) lookup(ctx context.Context, host string, ttl time.Durati
 	h.mu.Unlock()
 	// Slow path: coalesce concurrent same-host lookups; the map lock is
 	// NOT held during the network resolve, so a slow host-A resolve can't
-	// block a concurrent host-B resolve. LookupHost uses ctx, so a
-	// cancelled ctx surfaces as an error (not cached).
+	// block a concurrent host-B resolve. The leader uses a
+	// caller-cancellation-surviving context so that waiters with still-valid
+	// contexts are not poisoned by a cancelled leader. After the singleflight
+	// returns, we check the ORIGINAL caller context before using the cached
+	// result.
 	v, err, _ := h.sf.Do(host, func() (interface{}, error) {
-		ips, lerr := h.resolver.LookupHost(ctx, host)
+		// Use a context that survives the leader's cancellation so
+		// concurrent waiters with valid contexts get the cached result.
+		resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		ips, lerr := h.resolver.LookupHost(resolveCtx, host)
 		if lerr != nil || len(ips) == 0 {
 			if lerr == nil {
 				lerr = fmt.Errorf("no addresses for %s", host)
@@ -77,6 +84,12 @@ func (h *hostnameCache) lookup(ctx context.Context, host string, ttl time.Durati
 	})
 	if err != nil {
 		return "", err
+	}
+	// Check the ORIGINAL caller context: if this caller cancelled
+	// while the leader was resolving, return the cancellation error
+	// rather than the cached IP.
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
 	return v.(string), nil
 }

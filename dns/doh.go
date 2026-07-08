@@ -79,12 +79,18 @@ func (c *dohClient) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("DoH HTTP %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/dns-message" {
+		return nil, fmt.Errorf("DoH unexpected Content-Type: %q", ct)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
